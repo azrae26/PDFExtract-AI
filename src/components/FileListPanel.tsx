@@ -88,7 +88,7 @@ export default function FileListPanel({
                   >
                     <StatusIcon status={entry.status} />
                     <div className="min-w-0 flex-1">
-                      <p className="truncate font-medium leading-tight">{entry.name}</p>
+                      <p className="font-medium leading-tight line-clamp-2 break-all">{entry.name}</p>
                       <p className="text-[10px] text-gray-400 mt-0.5">
                         {entry.status === 'done' && `${entry.numPages} 頁`}
                         {entry.status === 'processing' && '分析中...'}

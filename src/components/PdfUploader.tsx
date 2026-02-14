@@ -15,7 +15,6 @@ export const GEMINI_MODELS = [
   { id: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash', desc: '高性價比，帶思考能力' },
   { id: 'gemini-3-flash-preview', label: 'Gemini 3 Flash', desc: '最新一代，速度與品質平衡' },
   { id: 'gemini-3-pro-preview', label: 'Gemini 3 Pro', desc: '最強推理能力，旗艦模型' },
-  { id: 'gemini-2.5-flash-image', label: 'Nano Banana (2.5 Flash Image)', desc: '多模態圖像理解與生成' },
 ] as const;
 
 export const DEFAULT_MODEL = 'gemini-3-pro-preview';
@@ -29,6 +28,8 @@ interface PdfUploaderProps {
   onModelChange: (model: string) => void;
   batchSize: number;
   onBatchSizeChange: (size: number) => void;
+  skipLastPages: number;
+  onSkipLastPagesChange: (n: number) => void;
   isAnalyzing: boolean;
   progress: { current: number; total: number };
   onReanalyze: () => void;
@@ -47,6 +48,8 @@ export default function PdfUploader({
   onModelChange,
   batchSize,
   onBatchSizeChange,
+  skipLastPages,
+  onSkipLastPagesChange,
   isAnalyzing,
   progress,
   onReanalyze,
@@ -59,12 +62,7 @@ export default function PdfUploader({
     <div className="w-full h-full flex flex-col border-r border-gray-200 bg-white overflow-hidden">
       {/* 標題 */}
       <div className="px-4 py-3 border-b border-gray-200 bg-gray-50">
-        <h2 className="text-sm font-semibold text-gray-700">
-          設定
-          {fileName && (
-            <span className="ml-2 font-normal text-gray-400 truncate" title={fileName}>— {fileName}</span>
-          )}
-        </h2>
+        <h2 className="text-sm font-semibold text-gray-700">設定</h2>
       </div>
 
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
@@ -98,6 +96,20 @@ export default function PdfUploader({
               className="w-full px-2 py-2 text-sm text-center border border-gray-300 rounded-lg bg-gray-50 text-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
             />
           </div>
+          <div className="w-20 flex-shrink-0">
+            <label className="text-xs font-medium text-gray-500 mb-1.5 block whitespace-nowrap">忽略末尾頁數</label>
+            <input
+              type="number"
+              min={0}
+              max={999}
+              value={skipLastPages}
+              onChange={(e) => {
+                const v = parseInt(e.target.value, 10);
+                if (!isNaN(v) && v >= 0) onSkipLastPagesChange(v);
+              }}
+              className="w-full px-2 py-2 text-sm text-center border border-gray-300 rounded-lg bg-gray-50 text-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            />
+          </div>
         </div>
 
         {/* 識別文字框 Prompt */}
@@ -122,27 +134,35 @@ export default function PdfUploader({
           />
         </div>
 
-        {/* 重新分析按鈕 */}
-        {hasFile && !isAnalyzing && (
+        {/* 重新分析按鈕（分析中也保持顯示但禁用） */}
+        {hasFile && (
           <button
             onClick={onReanalyze}
-            className="w-full py-2 px-4 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 active:bg-blue-800 transition-colors cursor-pointer"
+            disabled={isAnalyzing}
+            className={`w-full py-2 px-4 text-sm font-medium rounded-lg transition-colors ${
+              isAnalyzing
+                ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                : 'bg-blue-600 text-white hover:bg-blue-700 active:bg-blue-800 cursor-pointer'
+            }`}
           >
-            重新分析
+            {isAnalyzing ? '分析中...' : '重新分析'}
           </button>
         )}
 
-        {/* 分析進度 */}
+        {/* 分析進度（在按鈕下方） */}
         {isAnalyzing && (
           <div className="space-y-2">
             <div className="flex items-center gap-2">
-              <div className="animate-spin w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full" />
-              <span className="text-sm text-blue-600 flex-1 truncate">
-                分析中{fileName ? ` — ${fileName}` : ''}... {progress.current} / {progress.total} 頁
+              <div className="animate-spin w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full flex-shrink-0" />
+              <span className="text-sm text-blue-600 truncate min-w-0">
+                {fileName || ''}
+              </span>
+              <span className="text-sm text-blue-600 flex-shrink-0 whitespace-nowrap">
+                {progress.current}/{progress.total} 頁
               </span>
               <button
                 onClick={onStop}
-                className="px-2.5 py-0.5 text-xs font-medium bg-red-50 text-red-600 border border-red-200 rounded hover:bg-red-100 active:bg-red-200 transition-colors cursor-pointer"
+                className="flex-shrink-0 px-2.5 py-0.5 text-xs font-medium bg-red-50 text-red-600 border border-red-200 rounded hover:bg-red-100 active:bg-red-200 transition-colors cursor-pointer"
               >
                 停止
               </button>

@@ -63,9 +63,11 @@ export default function PDFExtractApp() {
   // === 多檔案狀態 ===
   const [files, setFiles] = useState<FileEntry[]>([]);
   const [activeFileId, setActiveFileId] = useState<string | null>(null);
-  // 用 ref 追蹤最新的 files，避免 callback 內 closure stale
+  // 用 ref 追蹤最新的 files / activeFileId，避免 callback 內 closure stale
   const filesRef = useRef<FileEntry[]>([]);
   filesRef.current = files;
+  const activeFileIdRef = useRef<string | null>(null);
+  activeFileIdRef.current = activeFileId;
   // 標記是否正在自動處理佇列（避免重複觸發）
   const processingQueueRef = useRef(false);
 
@@ -76,6 +78,22 @@ export default function PDFExtractApp() {
 
   // === 目前活躍檔案的 pageRegions（雙向同步） ===
   const [pageRegions, setPageRegions] = useState<Map<number, Region[]>>(new Map());
+
+  /** 檔案級 regions 更新器：自動判斷寫入 shared state（活躍檔案）或 files 陣列（背景檔案） */
+  const updateFileRegions = useCallback(
+    (targetFileId: string, updater: (prev: Map<number, Region[]>) => Map<number, Region[]>) => {
+      if (targetFileId === activeFileIdRef.current) {
+        // 目標就是活躍檔案 → 更新 shared pageRegions state（UI 即時反映）
+        setPageRegions(updater);
+      } else {
+        // 背景檔案 → 直接寫入 files 陣列
+        setFiles((prev) =>
+          prev.map((f) => (f.id === targetFileId ? { ...f, pageRegions: updater(f.pageRegions) } : f))
+        );
+      }
+    },
+    []
+  );
 
   const [currentPage, setCurrentPage] = useState(1);
   const [prompt, setPrompt] = useState(() => {
@@ -93,6 +111,10 @@ export default function PDFExtractApp() {
   const [batchSize, setBatchSize] = useState(() => {
     const cfg = loadConfig();
     return typeof cfg.batchSize === 'number' ? cfg.batchSize : DEFAULT_BATCH_SIZE;
+  });
+  const [skipLastPages, setSkipLastPages] = useState(() => {
+    const cfg = loadConfig();
+    return typeof cfg.skipLastPages === 'number' ? cfg.skipLastPages : 4;
   });
   const [hoveredRegionId, setHoveredRegionId] = useState<string | null>(null);
   const [scrollTarget, setScrollTarget] = useState<string | null>(null);
@@ -126,6 +148,7 @@ export default function PDFExtractApp() {
     analysisProgress,
     error,
     abortRef,
+    analysisFileIdRef,
     analyzeAllPages,
     handleStop,
     invalidateSession,
@@ -136,28 +159,41 @@ export default function PDFExtractApp() {
     pdfDocRef,
     pageRegions,
     setPageRegions,
+    updateFileRegions,
     prompt,
     tablePrompt,
     model,
     batchSize,
   });
 
-  // === 切換檔案時：儲存舊檔案 regions → 載入新檔案 regions → 使舊 session 失效 ===
+  // === 切換檔案時：儲存舊檔案 regions → 載入新檔案 regions ===
+  // 若舊檔案正在分析中，不中斷 session（分析結果會透過 updateFileRegions 寫回正確檔案）
   const prevActiveFileIdRef = useRef<string | null>(null);
   useEffect(() => {
     if (activeFileId === prevActiveFileIdRef.current) return;
 
-    // 使舊的分析 session 全部失效（防止舊操作存取已銷毀的 pdfDoc）
-    invalidateSession();
-    pdfDocRef.current = null;
+    const prevId = prevActiveFileIdRef.current;
+    const prevFile = prevId ? filesRef.current.find((f) => f.id === prevId) : null;
+    const prevIsAnalyzing = prevFile?.status === 'processing';
+
+    if (prevIsAnalyzing) {
+      // 舊檔案正在分析中 → 不中斷 session，分析結果透過 updateFileRegions 直接寫入 files 陣列
+      const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
+      console.log(`[PDFExtractApp][${ts}] 🔄 Switching away from analyzing file, analysis continues in background`);
+    } else {
+      // 舊檔案沒在分析 → 正常中斷 session
+      invalidateSession();
+    }
 
     // 儲存前一個檔案的 regions
-    if (prevActiveFileIdRef.current) {
-      const prevId = prevActiveFileIdRef.current;
+    if (prevId) {
       setFiles((prev) =>
         prev.map((f) => (f.id === prevId ? { ...f, pageRegions: new Map(pageRegions) } : f))
       );
     }
+
+    // 切換 pdfDocRef（新檔案會由 handleDocumentLoad 設定）
+    pdfDocRef.current = null;
 
     // 載入新檔案的 regions
     const newFile = filesRef.current.find((f) => f.id === activeFileId);
@@ -181,6 +217,7 @@ export default function PDFExtractApp() {
   useEffect(() => { saveConfig({ tablePrompt }); }, [tablePrompt]);
   useEffect(() => { saveConfig({ model }); }, [model]);
   useEffect(() => { saveConfig({ batchSize }); }, [batchSize]);
+  useEffect(() => { saveConfig({ skipLastPages }); }, [skipLastPages]);
   useEffect(() => { saveConfig({ fileListWidth }); }, [fileListWidth]);
   useEffect(() => { saveConfig({ leftWidth }); }, [leftWidth]);
   useEffect(() => { saveConfig({ rightWidth }); }, [rightWidth]);
@@ -353,29 +390,69 @@ export default function PDFExtractApp() {
 
       setCurrentPage(1);
 
-      // 如果此檔案是 processing 狀態，自動開始分析
+      // 如果此檔案是 processing 狀態，自動開始分析（扣除忽略的末尾頁數）
       const currentFile = currentFiles.find((f) => f.id === currentActiveId);
-      if (currentFile?.status === 'processing') {
-        analyzeAllPages(pdf.numPages, prompt, model, batchSize);
+      if (currentFile?.status === 'processing' && currentActiveId) {
+        const pagesToAnalyze = Math.max(1, pdf.numPages - skipLastPages);
+        analyzeAllPages(pagesToAnalyze, prompt, model, batchSize, currentActiveId, currentFile.url);
       }
     },
-    [activeFileId, prompt, model, batchSize, analyzeAllPages]
+    [activeFileId, prompt, model, batchSize, skipLastPages, analyzeAllPages]
   );
 
-  // === 分析完成後，標記當前檔案為 done 並處理下一個 ===
+  // === 分析完成後，標記目標檔案為 done 並處理下一個 ===
   useEffect(() => {
     if (isAnalyzing) return;
-    if (!activeFileId) return;
 
-    const currentFile = filesRef.current.find((f) => f.id === activeFileId);
-    if (currentFile?.status === 'processing') {
-      // 分析結束（不管有沒有結果），標記為 done
-      setFiles((prev) =>
-        prev.map((f) => (f.id === activeFileId ? { ...f, status: 'done' as const } : f))
-      );
+    // 找到剛完成分析的檔案（可能不是目前活躍的檔案）
+    const targetFileId = analysisFileIdRef.current;
+    // 讀取完後立即清除 ref（避免重複觸發）
+    analysisFileIdRef.current = null;
 
-      // 處理佇列中的下一個
-      setTimeout(() => processNextInQueue(), 100);
+    // 也檢查所有 'processing' 的檔案（停止/中斷時 ref 可能已被清除）
+    const processingFiles = filesRef.current.filter((f) => f.status === 'processing');
+
+    // 標記目標檔案為 done
+    if (targetFileId) {
+      const targetFile = filesRef.current.find((f) => f.id === targetFileId);
+      if (targetFile?.status === 'processing') {
+        setFiles((prev) =>
+          prev.map((f) => (f.id === targetFileId ? { ...f, status: 'done' as const } : f))
+        );
+      }
+    }
+
+    // 安全網：標記所有其他仍在 processing 的檔案為 done
+    processingFiles.forEach((pf) => {
+      if (pf.id !== targetFileId) {
+        setFiles((prev) =>
+          prev.map((f) => (f.id === pf.id ? { ...f, status: 'done' as const } : f))
+        );
+      }
+    });
+
+    // 處理佇列中的下一個 queued 檔案
+    const hasProcessingOrTarget = targetFileId || processingFiles.length > 0;
+    if (hasProcessingOrTarget) {
+      setTimeout(() => {
+        const latestFiles = filesRef.current;
+        const nextQueued = latestFiles.find((f) => f.status === 'queued');
+        if (nextQueued) {
+          setFiles((prev) =>
+            prev.map((f) => (f.id === nextQueued.id ? { ...f, status: 'processing' as const } : f))
+          );
+          // 如果已在該檔案，直接啟動分析（handleDocumentLoad 不會再觸發）
+          if (nextQueued.id === activeFileIdRef.current && nextQueued.numPages > 0) {
+            const pagesToAnalyze = Math.max(1, nextQueued.numPages - skipLastPages);
+            analyzeAllPages(pagesToAnalyze, prompt, model, batchSize, nextQueued.id, nextQueued.url);
+          } else {
+            // 切到該檔案，handleDocumentLoad 會啟動分析
+            setActiveFileId(nextQueued.id);
+          }
+        } else {
+          processingQueueRef.current = false;
+        }
+      }, 100);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAnalyzing]);
@@ -574,6 +651,17 @@ export default function PDFExtractApp() {
     [pageRegions]
   );
 
+  // 分析中的檔案名（可能不是活躍檔案）
+  const analysisFileName = (() => {
+    if (!isAnalyzing) return activeFile?.name ?? null;
+    const targetId = analysisFileIdRef.current;
+    if (targetId) {
+      const targetFile = files.find((f) => f.id === targetId);
+      return targetFile?.name ?? null;
+    }
+    return activeFile?.name ?? null;
+  })();
+
   // 分界線共用的 UI 元素
   const Divider = ({ side }: { side: 'fileList' | 'left' | 'right' }) => (
     <div
@@ -633,13 +721,22 @@ export default function PDFExtractApp() {
           onModelChange={setModel}
           batchSize={batchSize}
           onBatchSizeChange={setBatchSize}
+          skipLastPages={skipLastPages}
+          onSkipLastPagesChange={setSkipLastPages}
           isAnalyzing={isAnalyzing}
           progress={analysisProgress}
-          onReanalyze={() => handleReanalyze(numPages)}
+          onReanalyze={() => {
+            if (!activeFileId || !activeFile) return;
+            // 設為 processing 讓檔案列表顯示轉圈
+            setFiles((prev) =>
+              prev.map((f) => (f.id === activeFileId ? { ...f, status: 'processing' as const } : f))
+            );
+            handleReanalyze(Math.max(1, numPages - skipLastPages), activeFileId, activeFile.url);
+          }}
           onStop={handleStop}
           hasFile={!!activeFile}
           error={error}
-          fileName={activeFile?.name ?? null}
+          fileName={analysisFileName}
         />
       </div>
 
@@ -659,7 +756,7 @@ export default function PDFExtractApp() {
         onRegionAdd={handleRegionAdd}
         getGlobalColorOffset={getGlobalColorOffset}
         scrollToRegionKey={scrollTarget}
-        onReanalyzePage={handleReanalyzePage}
+        onReanalyzePage={(pageNum: number) => handleReanalyzePage(pageNum, activeFileId ?? undefined)}
         onRegionDoubleClick={handleRegionDoubleClick}
       />
 

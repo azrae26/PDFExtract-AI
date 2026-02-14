@@ -3,7 +3,10 @@
  * 職責：頁面轉圖、API 呼叫（含失敗自動重試最多 2 次）、批次並行分析、單頁重送（支援多頁累加計數）、雙擊截圖識別
  * 依賴：react、pdfjs、types、constants、pdfTextExtract
  *
- * 重要設計：所有非同步操作都傳入 pdfDoc 快照 + sessionId，避免切換檔案後存取已銷毀的 PDF document
+ * 重要設計：
+ * - 所有非同步操作都傳入 pdfDoc 快照 + sessionId，避免切換檔案後存取已銷毀的 PDF document
+ * - 使用 updateFileRegions(targetFileId, updater) 寫入分析結果，支援切檔後分析繼續在背景執行
+ * - analysisFileIdRef 追蹤目前分析的目標檔案 ID
  */
 
 import { useState, useCallback, useRef } from 'react';
@@ -16,10 +19,18 @@ import { extractTextForRegions } from '@/lib/pdfTextExtract';
 const MAX_RETRIES = 2; // 最多重試 2 次（總共 3 次嘗試）
 const RETRY_BASE_DELAY_MS = 1500; // 首次重試等待 1.5 秒，之後遞增
 
+/** 檔案級 regions 更新器：自動判斷寫入 shared state 或 files 陣列 */
+type FileRegionsUpdater = (
+  targetFileId: string,
+  updater: (prev: Map<number, Region[]>) => Map<number, Region[]>,
+) => void;
+
 interface UseAnalysisOptions {
   pdfDocRef: React.MutableRefObject<pdfjs.PDFDocumentProxy | null>;
   pageRegions: Map<number, Region[]>;
   setPageRegions: React.Dispatch<React.SetStateAction<Map<number, Region[]>>>;
+  /** 檔案級 regions 更新器（切檔後分析結果能寫回正確檔案） */
+  updateFileRegions: FileRegionsUpdater;
   prompt: string;
   tablePrompt: string;
   model: string;
@@ -30,6 +41,7 @@ export default function useAnalysis({
   pdfDocRef,
   pageRegions,
   setPageRegions,
+  updateFileRegions,
   prompt,
   tablePrompt,
   model,
@@ -45,6 +57,8 @@ export default function useAnalysis({
   const inFlightPageRef = useRef(0);
   // Session ID：每次啟動新的全頁分析或切換檔案時遞增，非同步操作用此判斷是否已過期
   const analysisSessionRef = useRef(0);
+  // 目前分析的目標檔案 ID（支援切檔後分析繼續）
+  const analysisFileIdRef = useRef<string | null>(null);
 
   /** 檢查 session 是否仍有效 */
   const isSessionValid = useCallback((sessionId: number) => {
@@ -179,13 +193,14 @@ export default function useAnalysis({
   );
 
   /** 處理單頁分析結果：提取文字 + merge 到 pageRegions */
-  // 傳入 pdfDoc 快照 + sessionId
+  // 傳入 pdfDoc 快照 + sessionId + targetFileId
   const mergePageResult = useCallback(
     async (
       pageNum: number,
       result: { hasAnalysis: boolean; regions: Region[] },
       pdfDoc: pdfjs.PDFDocumentProxy,
       sessionId: number,
+      targetFileId: string,
     ) => {
       if (!result.hasAnalysis || result.regions.length === 0) return;
       if (!isSessionValid(sessionId)) return;
@@ -204,7 +219,7 @@ export default function useAnalysis({
       if (!isSessionValid(sessionId)) return;
 
       // Merge：保留 userModified 的 regions，追加 AI 新結果
-      setPageRegions((prev) => {
+      const mergeUpdater = (prev: Map<number, Region[]>) => {
         const updated = new Map(prev);
         const existing = updated.get(pageNum) || [];
         const userRegions = existing.filter((r) => r.userModified);
@@ -216,29 +231,49 @@ export default function useAnalysis({
         }));
         updated.set(pageNum, [...userRegions, ...aiRegions]);
         return updated;
-      });
+      };
+      updateFileRegions(targetFileId, mergeUpdater);
     },
-    [isSessionValid, setPageRegions]
+    [isSessionValid, updateFileRegions]
   );
 
   // === 自動分析所有頁面（批次並行，merge 不覆蓋 userModified）===
+  // 自己用 pdfjs.getDocument 載入獨立 pdfDoc，不依賴 react-pdf 的 document（切檔不會被銷毀）
   const analyzeAllPages = useCallback(
-    async (totalPages: number, promptText: string, modelId: string, concurrency: number) => {
-      // 取得當前 pdfDoc 快照，如果沒有就不跑
-      const pdfDoc = pdfDocRef.current;
-      if (!pdfDoc) return;
+    async (totalPages: number, promptText: string, modelId: string, concurrency: number, targetFileId: string, fileUrl: string) => {
+      // 記錄分析目標檔案 ID
+      analysisFileIdRef.current = targetFileId;
 
       // 遞增 session，讓舊的非同步操作全部失效
       const sessionId = ++analysisSessionRef.current;
 
       const timestamp = new Date().toLocaleTimeString('en-US', { hour12: false });
-      console.log(`[useAnalysis][${timestamp}] 🚀 Starting analysis (session=${sessionId}) of ${totalPages} pages in batches of ${concurrency} (model: ${modelId})...`);
+      console.log(`[useAnalysis][${timestamp}] 🚀 Starting analysis (session=${sessionId}, file=${targetFileId}) of ${totalPages} pages in batches of ${concurrency} (model: ${modelId})...`);
 
       abortRef.current = false;
       setIsAnalyzing(true);
       setError(null);
+
+      // 載入獨立的 pdfDoc（不受 react-pdf 切檔銷毀影響）
+      let pdfDoc: pdfjs.PDFDocumentProxy;
+      try {
+        pdfDoc = await pdfjs.getDocument(fileUrl).promise;
+      } catch (e) {
+        const ts2 = new Date().toLocaleTimeString('en-US', { hour12: false });
+        console.error(`[useAnalysis][${ts2}] ❌ Failed to load PDF for analysis:`, e);
+        setError('無法載入 PDF 檔案');
+        setIsAnalyzing(false);
+        analysisFileIdRef.current = null;
+        return;
+      }
+
+      if (!isSessionValid(sessionId)) {
+        pdfDoc.destroy();
+        return;
+      }
+
       // 清除非 userModified 的 regions，保留手動修改/新增的
-      setPageRegions((prev) => {
+      updateFileRegions(targetFileId, (prev) => {
         const kept = new Map<number, Region[]>();
         prev.forEach((regions, page) => {
           const userRegions = regions.filter((r) => r.userModified);
@@ -262,7 +297,7 @@ export default function useAnalysis({
         setAnalysisProgress({ current: completed, total: totalPages });
 
         if (result) {
-          await mergePageResult(pageNum, result, pdfDoc, sessionId);
+          await mergePageResult(pageNum, result, pdfDoc, sessionId, targetFileId);
         }
       };
 
@@ -279,20 +314,25 @@ export default function useAnalysis({
         await Promise.all(pageNums.map((p) => processPage(p)));
       }
 
+      // 清理獨立的 pdfDoc
+      try { pdfDoc.destroy(); } catch { /* ignore */ }
+
       // 只有 session 仍有效時才設定完成狀態（否則可能覆蓋新 session 的狀態）
+      // 注意：不在這裡清除 analysisFileIdRef，由 PDFExtractApp 的 completion effect 讀取後清除
       if (isSessionValid(sessionId)) {
         setIsAnalyzing(false);
         const endTimestamp = new Date().toLocaleTimeString('en-US', { hour12: false });
         console.log(`[useAnalysis][${endTimestamp}] 🏁 Analysis complete (session=${sessionId}).`);
       }
     },
-    [pdfDocRef, analyzePage, mergePageResult, setPageRegions, isSessionValid]
+    [analyzePage, mergePageResult, updateFileRegions, isSessionValid]
   );
 
   // === 停止分析 ===
   const handleStop = useCallback(() => {
     abortRef.current = true;
     analysisSessionRef.current++; // 讓飛行中操作全部失效
+    analysisFileIdRef.current = null;
     setIsAnalyzing(false);
     const timestamp = new Date().toLocaleTimeString('en-US', { hour12: false });
     console.log(`[useAnalysis][${timestamp}] 🛑 Analysis stopped by user.`);
@@ -309,21 +349,23 @@ export default function useAnalysis({
 
   // === 重新分析（清除所有框，包含手動修改的）===
   const handleReanalyze = useCallback(
-    (numPages: number) => {
-      if (pdfDocRef.current && numPages > 0) {
-        setPageRegions(new Map());
-        analyzeAllPages(numPages, prompt, model, batchSize);
+    (numPages: number, targetFileId: string, fileUrl: string) => {
+      if (numPages > 0 && fileUrl) {
+        updateFileRegions(targetFileId, () => new Map());
+        analyzeAllPages(numPages, prompt, model, batchSize, targetFileId, fileUrl);
       }
     },
-    [prompt, model, batchSize, analyzeAllPages, pdfDocRef, setPageRegions]
+    [prompt, model, batchSize, analyzeAllPages, updateFileRegions]
   );
 
   // === 重新分析單頁（修正：支援多頁同時重送，計數會累加而非覆蓋）===
+  // 單頁重送一定是活躍檔案，由外部傳入 targetFileId
   const handleReanalyzePage = useCallback(
-    async (pageNum: number) => {
+    async (pageNum: number, targetFileId?: string) => {
       const pdfDoc = pdfDocRef.current;
       if (!pdfDoc) return;
       const sessionId = analysisSessionRef.current; // 用當前 session（不遞增，因為是單頁操作）
+      const fileId = targetFileId || analysisFileIdRef.current || '';
 
       const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
       console.log(`[useAnalysis][${ts}] 🔄 Re-analyzing page ${pageNum}...`);
@@ -359,7 +401,7 @@ export default function useAnalysis({
       }));
 
       if (result && isSessionValid(sessionId)) {
-        await mergePageResult(pageNum, result, pdfDoc, sessionId);
+        await mergePageResult(pageNum, result, pdfDoc, sessionId, fileId);
       }
 
       // 只有當所有飛行中的頁面都完成時才停止分析狀態
@@ -534,6 +576,8 @@ export default function useAnalysis({
     error,
     setError,
     abortRef,
+    /** 目前分析目標檔案 ID（分析進行中不為 null） */
+    analysisFileIdRef,
     analyzeAllPages,
     handleStop,
     invalidateSession,
