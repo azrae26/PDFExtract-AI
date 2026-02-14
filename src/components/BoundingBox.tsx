@@ -144,19 +144,6 @@ export default function BoundingBox({
           onDoubleClick();
         }}
       >
-        {/* 區域標籤 — 顯示在左上角 */}
-        {region.label && (
-          <span
-            className="absolute -top-5 left-0 text-[10px] font-medium px-1 py-0.5 rounded whitespace-nowrap"
-            style={{
-              backgroundColor: color.border,
-              color: '#fff',
-            }}
-          >
-            {region.label}
-          </span>
-        )}
-
         {/* X 刪除按鈕 — 右上角 */}
         <button
           className="absolute -top-2.5 -right-2.5 w-5 h-5 rounded-full flex items-center justify-center text-white text-xs font-bold opacity-0 hover:opacity-100 group-hover:opacity-80 transition-opacity cursor-pointer z-30"

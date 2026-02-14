@@ -1,6 +1,6 @@
 /**
  * 功能：PDFExtract AI 共用型別定義
- * 職責：定義 API 請求/回應、區域標註、頁面分析、多檔案管理等資料結構
+ * 職責：定義 API 請求/回應、區域標註、頁面分析（含券商名 report）、多檔案管理等資料結構
  */
 
 /** 單一標註區域 */
@@ -20,6 +20,8 @@ export interface Region {
 export interface PageAnalysis {
   page: number;
   hasAnalysis: boolean;
+  /** 券商名（AI 回傳，同一份 PDF 各頁通常相同） */
+  report?: string;
   regions: Region[];
 }
 
@@ -51,11 +53,13 @@ export interface FileEntry {
   /** 檔名 */
   name: string;
   /** 處理狀態 */
-  status: 'queued' | 'processing' | 'done' | 'error';
+  status: 'idle' | 'queued' | 'processing' | 'done' | 'stopped' | 'error';
   /** 總頁數（PDF 載入後才知道） */
   numPages: number;
   /** 各頁分析結果 */
   pageRegions: Map<number, Region[]>;
+  /** 券商名（從 AI 分析結果取得） */
+  report?: string;
 }
 
 /** Bounding Box 顏色定義 */

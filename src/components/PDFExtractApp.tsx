@@ -1,12 +1,18 @@
 /**
  * 功能：PDFExtract AI 主應用元件
- * 職責：管理全域狀態（多檔案佇列、PDF、分析結果、hover 互動）、四欄可拖動分界線佈局，串接上傳→轉圖→送API→畫框→顯示文字的完整流程
+ * 職責：管理全域狀態（多檔案佇列、PDF、hover 互動）、四欄可拖動分界線佈局，串接上傳→轉圖→送API→畫框→顯示文字的完整流程
  * 依賴：react-pdf (pdfjs)、useAnalysis hook、FileListPanel、PdfUploader、PdfViewer、TextPanel、API route /api/analyze
+ *
+ * 重要設計：
+ * - files 陣列是唯一資料來源（Single Source of Truth），每個 FileEntry 擁有自己的 pageRegions
+ * - pageRegions 從 activeFile.pageRegions 衍生（唯讀），所有寫入統一走 updateFileRegions / updateActiveFileRegions
+ * - 多 PdfViewer 預掛載（preload window 內的檔案同時掛載，CSS visibility toggle 實現零延遲切換）
+ * - 切檔 = 改 activeFileId → CSS visibility toggle，不需要 swap/sync/remount
  */
 
 'use client';
 
-import { useState, useCallback, useRef, useEffect } from 'react';
+import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import { pdfjs } from 'react-pdf';
 import PdfUploader from './PdfUploader';
 import PdfViewer from './PdfViewer';
@@ -31,6 +37,13 @@ const DEFAULT_RIGHT_RATIO = 0.3;
 // === localStorage 持久化 key ===
 const STORAGE_KEY = 'pdfextract-ai-config';
 
+/** 預設券商忽略末尾頁數映射（使用者可自行調整） */
+const DEFAULT_BROKER_SKIP_MAP: Record<string, number> = {
+  'Nomura': 4, 'Daiwa': 4, 'JPM': 4, 'HSBC': 4, 'GS': 4, 'MS': 4, 'Citi': 4,
+  '凱基': 4, '國票': 4, '兆豐': 4, '統一': 4, '永豐': 4, '元大': 4, '中信': 4,
+  '元富': 4, '群益': 4, '宏遠': 4, '康和': 4, '富邦': 4, '一銀': 4, '福邦': 4,
+};
+
 /** 從 localStorage 讀取已儲存的配置 */
 function loadConfig(): Record<string, unknown> {
   try {
@@ -54,6 +67,10 @@ function generateFileId(): string {
   return `file-${Date.now()}-${++_fileIdCounter}`;
 }
 
+/** 空 Map / Set 常數（避免每次 render 建立新物件導致不必要的 re-render） */
+const EMPTY_MAP = new Map<number, Region[]>();
+const EMPTY_SET = new Set<number>();
+
 // 設定 PDF.js worker（使用 CDN，避免 bundler 問題）
 if (typeof window !== 'undefined') {
   pdfjs.GlobalWorkerOptions.workerSrc = `//unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
@@ -73,24 +90,67 @@ export default function PDFExtractApp() {
 
   // === 目前活躍檔案的衍生狀態 ===
   const activeFile = files.find((f) => f.id === activeFileId) ?? null;
-  const pdfUrl = activeFile?.url ?? null;
   const numPages = activeFile?.numPages ?? 0;
 
-  // === 目前活躍檔案的 pageRegions（雙向同步） ===
-  const [pageRegions, setPageRegions] = useState<Map<number, Region[]>>(new Map());
+  // === pageRegions 從 activeFile 衍生（唯讀，Single Source of Truth） ===
+  const pageRegions = useMemo(
+    () => activeFile?.pageRegions ?? EMPTY_MAP,
+    [activeFile?.pageRegions]
+  );
 
-  /** 檔案級 regions 更新器：自動判斷寫入 shared state（活躍檔案）或 files 陣列（背景檔案） */
+  /** 更新指定檔案的 pageRegions（統一寫入 files 陣列） */
   const updateFileRegions = useCallback(
     (targetFileId: string, updater: (prev: Map<number, Region[]>) => Map<number, Region[]>) => {
-      if (targetFileId === activeFileIdRef.current) {
-        // 目標就是活躍檔案 → 更新 shared pageRegions state（UI 即時反映）
-        setPageRegions(updater);
-      } else {
-        // 背景檔案 → 直接寫入 files 陣列
-        setFiles((prev) =>
-          prev.map((f) => (f.id === targetFileId ? { ...f, pageRegions: updater(f.pageRegions) } : f))
-        );
+      setFiles((prev) =>
+        prev.map((f) => (f.id === targetFileId ? { ...f, pageRegions: updater(f.pageRegions) } : f))
+      );
+    },
+    []
+  );
+
+  /** 更新指定檔案的券商名（report），並依券商特定忽略末尾頁數取消多餘排隊頁面 */
+  const updateFileReport = useCallback(
+    (targetFileId: string, report: string) => {
+      setFiles((prev) =>
+        prev.map((f) => (f.id === targetFileId ? { ...f, report } : f))
+      );
+
+      // 若券商有特定忽略末尾頁數，且比目前分析使用的全域預設值多，取消多餘排隊頁面
+      // 注意：不修改全域 skipLastPages（那是使用者手動設的預設值，僅在無法辨識券商時使用）
+      const brokerSkip = brokerSkipMapRef.current[report];
+      if (brokerSkip !== undefined) {
+        const file = filesRef.current.find((f) => f.id === targetFileId);
+        if (file && file.numPages > 0) {
+          const oldPages = Math.max(1, file.numPages - skipLastPagesRef.current);
+          const newPages = Math.max(1, file.numPages - brokerSkip);
+          const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
+          console.log(
+            `[PDFExtractApp][${ts}] 🏢 Broker "${report}" detected (brokerSkip=${brokerSkip}, globalDefault=${skipLastPagesRef.current})`
+          );
+
+          // 若需分析更少頁面（brokerSkip > 全域預設值），取消多餘排隊頁面
+          if (newPages < oldPages) {
+            for (let p = newPages + 1; p <= oldPages; p++) {
+              cancelQueuedPageRef.current(targetFileId, p);
+            }
+            console.log(
+              `[PDFExtractApp][${ts}] ⏭️ Cancelled queued pages ${newPages + 1}–${oldPages} for file ${targetFileId}`
+            );
+          }
+        }
       }
+    },
+    []
+  );
+
+  /** 更新活躍檔案的 pageRegions（便利函式） */
+  const updateActiveFileRegions = useCallback(
+    (updater: (prev: Map<number, Region[]>) => Map<number, Region[]>) => {
+      const id = activeFileIdRef.current;
+      if (!id) return;
+      setFiles((prev) =>
+        prev.map((f) => (f.id === id ? { ...f, pageRegions: updater(f.pageRegions) } : f))
+      );
     },
     []
   );
@@ -116,6 +176,20 @@ export default function PDFExtractApp() {
     const cfg = loadConfig();
     return typeof cfg.skipLastPages === 'number' ? cfg.skipLastPages : 4;
   });
+  // 券商 → 忽略末尾頁數映射（持久化到 localStorage）
+  const [brokerSkipMap, setBrokerSkipMap] = useState<Record<string, number>>(() => {
+    const cfg = loadConfig();
+    // 若 localStorage 中有非空的 brokerSkipMap 就使用，否則用預設值
+    if (typeof cfg.brokerSkipMap === 'object' && cfg.brokerSkipMap !== null
+        && Object.keys(cfg.brokerSkipMap as Record<string, number>).length > 0) {
+      return cfg.brokerSkipMap as Record<string, number>;
+    }
+    return { ...DEFAULT_BROKER_SKIP_MAP };
+  });
+  const brokerSkipMapRef = useRef(brokerSkipMap);
+  const skipLastPagesRef = useRef(skipLastPages);
+  // cancelQueuedPage 來自 useAnalysis（在 updateFileReport 之後才可用），用 ref 橋接
+  const cancelQueuedPageRef = useRef<(fid: string, p: number) => void>(() => {});
   const [hoveredRegionId, setHoveredRegionId] = useState<string | null>(null);
   const [scrollTarget, setScrollTarget] = useState<string | null>(null);
 
@@ -142,6 +216,11 @@ export default function PDFExtractApp() {
 
   const pdfDocRef = useRef<pdfjs.PDFDocumentProxy | null>(null);
 
+  // === PDF Document 預載快取（預載：目前 + 後4份；釋放：超過7份才驅逐，從上方檔案先釋放）===
+  const pdfDocCacheRef = useRef<Map<string, pdfjs.PDFDocumentProxy>>(new Map());
+  const PDF_PRELOAD_WINDOW = 5; // 預載視窗大小（目前 + 後 4 份）
+  const PDF_CACHE_MAX = 7;      // 快取超過此數量才開始驅逐
+
   // === useAnalysis Hook ===
   const {
     isAnalyzing,
@@ -149,68 +228,193 @@ export default function PDFExtractApp() {
     error,
     abortRef,
     analysisFileIdRef,
+    stoppedByUserRef,
+    analyzingPagesMap,
+    queuedPagesMap,
     analyzeAllPages,
     handleStop,
     invalidateSession,
     handleReanalyze,
     handleReanalyzePage,
     handleRegionDoubleClick,
+    cancelQueuedPage,
   } = useAnalysis({
     pdfDocRef,
-    pageRegions,
-    setPageRegions,
     updateFileRegions,
+    updateFileReport,
     prompt,
     tablePrompt,
     model,
     batchSize,
   });
+  // 橋接 cancelQueuedPage 到 ref（供 updateFileReport 回呼使用）
+  cancelQueuedPageRef.current = cancelQueuedPage;
 
-  // === 切換檔案時：儲存舊檔案 regions → 載入新檔案 regions ===
-  // 若舊檔案正在分析中，不中斷 session（分析結果會透過 updateFileRegions 寫回正確檔案）
+  // === 跨檔案 worker pool 的 getNextFile callback ===
+  // 從 files 中找下一個 queued 檔案，標記為 processing，回傳檔案資訊
+  const getNextFileForPool = useCallback(async (): Promise<{ fileId: string; url: string; totalPages: number } | null> => {
+    const latestFiles = filesRef.current;
+    const nextQueued = latestFiles.find((f) => f.status === 'queued');
+    if (!nextQueued) return null;
+
+    // 標記為 processing
+    setFiles((prev) =>
+      prev.map((f) => (f.id === nextQueued.id ? { ...f, status: 'processing' as const } : f))
+    );
+
+    // 取得頁數
+    let pages = nextQueued.numPages;
+    // 優先從預載快取取得 numPages
+    if (pages === 0) {
+      const cachedDoc = pdfDocCacheRef.current.get(nextQueued.id);
+      if (cachedDoc) {
+        pages = cachedDoc.numPages;
+        setFiles((prev) =>
+          prev.map((f) => (f.id === nextQueued.id ? { ...f, numPages: pages } : f))
+        );
+      }
+    }
+    // 快取也沒有，則載入取得頁數
+    if (pages === 0) {
+      try {
+        const tempDoc = await pdfjs.getDocument(nextQueued.url).promise;
+        pages = tempDoc.numPages;
+        // 存入快取（避免重複載入）
+        pdfDocCacheRef.current.set(nextQueued.id, tempDoc);
+        setFiles((prev) =>
+          prev.map((f) => (f.id === nextQueued.id ? { ...f, numPages: pages } : f))
+        );
+        const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
+        console.log(`[PDFExtractApp][${ts}] 📄 Loaded page count for queued file: ${pages} pages`);
+      } catch (e) {
+        const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
+        console.error(`[PDFExtractApp][${ts}] ❌ Failed to load queued PDF:`, e);
+        setFiles((prev) =>
+          prev.map((f) => (f.id === nextQueued.id ? { ...f, status: 'error' as const } : f))
+        );
+        return null;
+      }
+    }
+
+    // 若檔案已有券商名且在 brokerSkipMap 中有設定，優先使用券商特定值
+    const effectiveSkip = (nextQueued.report && brokerSkipMapRef.current[nextQueued.report] !== undefined)
+      ? brokerSkipMapRef.current[nextQueued.report]
+      : skipLastPages;
+    const pagesToAnalyze = Math.max(1, pages - effectiveSkip);
+    return { fileId: nextQueued.id, url: nextQueued.url, totalPages: pagesToAnalyze };
+  }, [skipLastPages]);
+
+  // === 跨檔案 worker pool 的 onFileComplete callback ===
+  // 將完成的檔案標記為 done（或 error）
+  const handlePoolFileComplete = useCallback((fileId: string, hasError?: boolean) => {
+    setFiles((prev) =>
+      prev.map((f) => (f.id === fileId ? { ...f, status: hasError ? 'error' as const : 'done' as const } : f))
+    );
+    const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
+    console.log(`[PDFExtractApp][${ts}] ${hasError ? '❌' : '✅'} File ${fileId} marked as ${hasError ? 'error' : 'done'}`);
+  }, []);
+
+  // === 切換檔案時：清理 pdfDocRef，條件性中斷 session ===
+  // 不需要 swap/sync pageRegions，因為 pageRegions 直接從 files 衍生
   const prevActiveFileIdRef = useRef<string | null>(null);
   useEffect(() => {
     if (activeFileId === prevActiveFileIdRef.current) return;
 
-    const prevId = prevActiveFileIdRef.current;
-    const prevFile = prevId ? filesRef.current.find((f) => f.id === prevId) : null;
-    const prevIsAnalyzing = prevFile?.status === 'processing';
-
-    if (prevIsAnalyzing) {
-      // 舊檔案正在分析中 → 不中斷 session，分析結果透過 updateFileRegions 直接寫入 files 陣列
+    // 只要有任何檔案正在分析，就不中斷 session（分析結果透過 updateFileRegions 直接寫入 files 陣列）
+    const anyProcessing = filesRef.current.some((f) => f.status === 'processing');
+    if (anyProcessing) {
       const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
-      console.log(`[PDFExtractApp][${ts}] 🔄 Switching away from analyzing file, analysis continues in background`);
+      console.log(`[PDFExtractApp][${ts}] 🔄 Switching files while analysis is running, keeping session alive`);
     } else {
-      // 舊檔案沒在分析 → 正常中斷 session
       invalidateSession();
     }
 
-    // 儲存前一個檔案的 regions
-    if (prevId) {
-      setFiles((prev) =>
-        prev.map((f) => (f.id === prevId ? { ...f, pageRegions: new Map(pageRegions) } : f))
-      );
+    // 從快取立即設定 pdfDocRef（若有），讓分析操作可立即使用
+    if (activeFileId && pdfDocCacheRef.current.has(activeFileId)) {
+      pdfDocRef.current = pdfDocCacheRef.current.get(activeFileId)!;
+    } else {
+      pdfDocRef.current = null;
     }
-
-    // 切換 pdfDocRef（新檔案會由 handleDocumentLoad 設定）
-    pdfDocRef.current = null;
-
-    // 載入新檔案的 regions
-    const newFile = filesRef.current.find((f) => f.id === activeFileId);
-    setPageRegions(newFile ? new Map(newFile.pageRegions) : new Map());
 
     prevActiveFileIdRef.current = activeFileId;
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeFileId]);
 
-  // 同步 pageRegions 回 files（當 regions 變化時）
+  // === PDF 滑動視窗預載：目前檔案 + 後 4 份 ===
   useEffect(() => {
-    if (!activeFileId) return;
-    setFiles((prev) =>
-      prev.map((f) => (f.id === activeFileId ? { ...f, pageRegions: new Map(pageRegions) } : f))
-    );
+    const cache = pdfDocCacheRef.current;
+    const currentFiles = filesRef.current;
+    const currentIdx = currentFiles.findIndex((f) => f.id === activeFileId);
+    if (currentIdx === -1) return;
+
+    // 計算視窗內的 fileIds（目前 + 後 PDF_PRELOAD_WINDOW-1 份）
+    const windowFileIds = new Set<string>();
+    for (let i = currentIdx; i < Math.min(currentIdx + PDF_PRELOAD_WINDOW, currentFiles.length); i++) {
+      windowFileIds.add(currentFiles[i].id);
+    }
+
+    // 預載視窗內尚未快取的檔案
+    windowFileIds.forEach((fid) => {
+      if (cache.has(fid)) return;
+      const fileEntry = currentFiles.find((f) => f.id === fid);
+      if (!fileEntry) return;
+
+      // 非同步預載（不阻塞 UI）
+      pdfjs.getDocument(fileEntry.url).promise.then((doc) => {
+        // 檢查此檔案是否還在 files 中（可能已被刪除）
+        const stillExists = filesRef.current.some((f) => f.id === fid);
+        if (!stillExists) {
+          doc.destroy();
+          return;
+        }
+        cache.set(fid, doc);
+
+        // 順便更新 numPages（若為 0）
+        const entry = filesRef.current.find((f) => f.id === fid);
+        if (entry && entry.numPages === 0) {
+          setFiles((prev) =>
+            prev.map((f) => (f.id === fid ? { ...f, numPages: doc.numPages } : f))
+          );
+        }
+
+        const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
+        console.log(`[PDFExtractApp][${ts}] 📦 Pre-loaded PDF: ${fileEntry.name} (${doc.numPages} pages)`);
+      }).catch((e) => {
+        console.warn(`[PDFExtractApp] ⚠️ Failed to pre-load PDF ${fid}:`, e);
+      });
+    });
+
+    // 驅逐：超過 PDF_CACHE_MAX 才釋放，從目前檔案上方（index 更小的）先驅逐
+    if (cache.size > PDF_CACHE_MAX) {
+      // 收集所有快取中的 fileId，依在 files 陣列中的 index 排序
+      const cachedIds = Array.from(cache.keys());
+      const fileIdToIdx = new Map(currentFiles.map((f, i) => [f.id, i]));
+
+      // 排出驅逐優先順序：目前檔案上方的 → index 由小到大（最遠的先驅逐）
+      const aboveIds = cachedIds
+        .filter((fid) => (fileIdToIdx.get(fid) ?? -1) < currentIdx)
+        .sort((a, b) => (fileIdToIdx.get(a) ?? 0) - (fileIdToIdx.get(b) ?? 0));
+      // 下方超出視窗的（距離目前越遠越先驅逐）
+      const belowIds = cachedIds
+        .filter((fid) => (fileIdToIdx.get(fid) ?? -1) > currentIdx + PDF_PRELOAD_WINDOW - 1)
+        .sort((a, b) => (fileIdToIdx.get(b) ?? 0) - (fileIdToIdx.get(a) ?? 0));
+      // 已不在 files 中的孤兒條目（最優先驅逐）
+      const orphanIds = cachedIds.filter((fid) => !fileIdToIdx.has(fid));
+
+      const evictOrder = [...orphanIds, ...aboveIds, ...belowIds];
+      let toEvict = cache.size - PDF_CACHE_MAX;
+      for (const fid of evictOrder) {
+        if (toEvict <= 0) break;
+        const doc = cache.get(fid);
+        if (doc) {
+          doc.destroy();
+          cache.delete(fid);
+          toEvict--;
+        }
+      }
+    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pageRegions]);
+  }, [activeFileId, files.length]);
 
   // === 自動儲存配置到 localStorage ===
   useEffect(() => { saveConfig({ prompt }); }, [prompt]);
@@ -218,9 +422,13 @@ export default function PDFExtractApp() {
   useEffect(() => { saveConfig({ model }); }, [model]);
   useEffect(() => { saveConfig({ batchSize }); }, [batchSize]);
   useEffect(() => { saveConfig({ skipLastPages }); }, [skipLastPages]);
+  useEffect(() => { saveConfig({ brokerSkipMap }); }, [brokerSkipMap]);
   useEffect(() => { saveConfig({ fileListWidth }); }, [fileListWidth]);
   useEffect(() => { saveConfig({ leftWidth }); }, [leftWidth]);
   useEffect(() => { saveConfig({ rightWidth }); }, [rightWidth]);
+  // === 同步 refs（供 updateFileReport 回呼穩定存取最新值）===
+  useEffect(() => { skipLastPagesRef.current = skipLastPages; }, [skipLastPages]);
+  useEffect(() => { brokerSkipMapRef.current = brokerSkipMap; }, [brokerSkipMap]);
 
   // === 分界線拖動事件處理 ===
   const handlePanelMouseMove = useCallback((e: MouseEvent) => {
@@ -280,20 +488,39 @@ export default function PDFExtractApp() {
   }, []);
 
   // === 處理佇列中的下一個檔案 ===
+  // 若 pdfDocCacheRef 已有該檔案的 doc（PdfViewer 預掛載已載入），直接呼叫 analyzeAllPages
+  // 否則等 handleDocumentLoadForFile 觸發（防止雙重啟動由 analysisFileIdRef 守衛）
   const processNextInQueue = useCallback(() => {
-    setFiles((prev) => {
-      const nextQueued = prev.find((f) => f.status === 'queued');
-      if (!nextQueued) {
-        processingQueueRef.current = false;
-        return prev;
-      }
-      // 將下一個設為 processing 並切換為活躍檔案
-      setActiveFileId(nextQueued.id);
-      return prev.map((f) =>
+    const latestFiles = filesRef.current;
+    const nextQueued = latestFiles.find((f) => f.status === 'queued');
+    if (!nextQueued) {
+      processingQueueRef.current = false;
+      return;
+    }
+
+    // 將下一個設為 processing 並切換為活躍檔案
+    setActiveFileId(nextQueued.id);
+    setFiles((prev) =>
+      prev.map((f) =>
         f.id === nextQueued.id ? { ...f, status: 'processing' as const } : f
-      );
-    });
-  }, []);
+      )
+    );
+
+    // 如果 PDF 已在預載快取中，直接啟動分析（不等 handleDocumentLoadForFile）
+    const cachedDoc = pdfDocCacheRef.current.get(nextQueued.id);
+    if (cachedDoc) {
+      const pages = nextQueued.numPages || cachedDoc.numPages;
+      // 若檔案已有券商名且在 brokerSkipMap 中有設定，優先使用券商特定值
+      const effectiveSkip2 = (nextQueued.report && brokerSkipMapRef.current[nextQueued.report] !== undefined)
+        ? brokerSkipMapRef.current[nextQueued.report]
+        : skipLastPages;
+      const pagesToAnalyze = Math.max(1, pages - effectiveSkip2);
+      const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
+      console.log(`[PDFExtractApp][${ts}] 🚀 PDF already cached, starting analysis directly for ${nextQueued.id}`);
+      analyzeAllPages(pagesToAnalyze, prompt, model, batchSize, nextQueued.id, nextQueued.url, getNextFileForPool, handlePoolFileComplete);
+    }
+    // else: PdfViewer 尚未載入，等 handleDocumentLoadForFile 觸發
+  }, [skipLastPages, prompt, model, batchSize, analyzeAllPages, getNextFileForPool, handlePoolFileComplete]);
 
   // === 檔案上傳（支援多檔）===
   const handleFilesUpload = useCallback(
@@ -369,90 +596,88 @@ export default function PDFExtractApp() {
     [handleFilesUpload]
   );
 
-  // === PDF Document 載入完成（由 react-pdf 觸發）===
-  const handleDocumentLoad = useCallback(
-    (pdf: pdfjs.PDFDocumentProxy) => {
+  // === PDF Document 載入完成（per-file scoped，由 react-pdf 觸發）===
+  const handleDocumentLoadForFile = useCallback(
+    (fileId: string, pdf: pdfjs.PDFDocumentProxy) => {
       const timestamp = new Date().toLocaleTimeString('en-US', { hour12: false });
-      console.log(`[PDFExtractApp][${timestamp}] 📄 PDF loaded: ${pdf.numPages} pages`);
+      console.log(`[PDFExtractApp][${timestamp}] 📄 PDF loaded (${fileId}): ${pdf.numPages} pages`);
 
-      pdfDocRef.current = pdf;
+      // 存入預載快取（若尚未快取）
+      if (!pdfDocCacheRef.current.has(fileId)) {
+        pdfDocCacheRef.current.set(fileId, pdf);
+      }
 
-      // 用 filesRef 讀取最新的 files（避免 closure stale）
-      const currentFiles = filesRef.current;
-      const currentActiveId = activeFileId;
+      // 僅活躍檔案才設定 pdfDocRef（供 useAnalysis 使用）
+      if (fileId === activeFileIdRef.current) {
+        pdfDocRef.current = pdf;
+      }
 
       // 更新檔案的 numPages
-      if (currentActiveId) {
-        setFiles((prev) =>
-          prev.map((f) => (f.id === currentActiveId ? { ...f, numPages: pdf.numPages } : f))
-        );
-      }
+      setFiles((prev) =>
+        prev.map((f) => (f.id === fileId ? { ...f, numPages: pdf.numPages } : f))
+      );
 
-      setCurrentPage(1);
-
-      // 如果此檔案是 processing 狀態，自動開始分析（扣除忽略的末尾頁數）
-      const currentFile = currentFiles.find((f) => f.id === currentActiveId);
-      if (currentFile?.status === 'processing' && currentActiveId) {
-        const pagesToAnalyze = Math.max(1, pdf.numPages - skipLastPages);
-        analyzeAllPages(pagesToAnalyze, prompt, model, batchSize, currentActiveId, currentFile.url);
+      // 如果此檔案是 processing 狀態且尚未在分析中，自動開始分析
+      // 重要：若 analysisFileIdRef.current 已等於此檔案 ID，表示分析正在進行，不要重啟
+      const currentFile = filesRef.current.find((f) => f.id === fileId);
+      if (currentFile?.status === 'processing' && analysisFileIdRef.current !== fileId) {
+        // 若檔案已有券商名且在 brokerSkipMap 中有設定，優先使用券商特定值
+        const effectiveSkipDoc = (currentFile.report && brokerSkipMapRef.current[currentFile.report] !== undefined)
+          ? brokerSkipMapRef.current[currentFile.report]
+          : skipLastPages;
+        const pagesToAnalyze = Math.max(1, pdf.numPages - effectiveSkipDoc);
+        analyzeAllPages(pagesToAnalyze, prompt, model, batchSize, fileId, currentFile.url, getNextFileForPool, handlePoolFileComplete);
       }
     },
-    [activeFileId, prompt, model, batchSize, skipLastPages, analyzeAllPages]
+    [prompt, model, batchSize, skipLastPages, analyzeAllPages, getNextFileForPool, handlePoolFileComplete]
   );
 
-  // === 分析完成後，標記目標檔案為 done 並處理下一個 ===
+  // === 分析完成後，標記殘餘 processing 檔案 + 處理 stopped 狀態 ===
+  // 注意：跨檔案 pool 中，各檔案完成時已由 handlePoolFileComplete 即時標記為 done
+  // 此 effect 僅處理 pool 整體結束後的收尾工作
   useEffect(() => {
     if (isAnalyzing) return;
 
-    // 找到剛完成分析的檔案（可能不是目前活躍的檔案）
+    // 判斷是否由使用者主動停止
+    const wasStopped = stoppedByUserRef.current;
+    stoppedByUserRef.current = false;
+
+    // 找到剛完成分析的主要檔案（可能不是目前活躍的檔案）
     const targetFileId = analysisFileIdRef.current;
     // 讀取完後立即清除 ref（避免重複觸發）
     analysisFileIdRef.current = null;
 
-    // 也檢查所有 'processing' 的檔案（停止/中斷時 ref 可能已被清除）
-    const processingFiles = filesRef.current.filter((f) => f.status === 'processing');
+    // 決定目標狀態：使用者中斷 → stopped，正常完成 → done
+    const finishedStatus = wasStopped ? ('stopped' as const) : ('done' as const);
 
-    // 標記目標檔案為 done
-    if (targetFileId) {
-      const targetFile = filesRef.current.find((f) => f.id === targetFileId);
-      if (targetFile?.status === 'processing') {
-        setFiles((prev) =>
-          prev.map((f) => (f.id === targetFileId ? { ...f, status: 'done' as const } : f))
-        );
-      }
+    // 安全網：標記所有仍在 processing 的檔案（正常情況下 handlePoolFileComplete 已處理）
+    const processingFiles = filesRef.current.filter((f) => f.status === 'processing');
+    if (processingFiles.length > 0 || (targetFileId && filesRef.current.find((f) => f.id === targetFileId)?.status === 'processing')) {
+      setFiles((prev) =>
+        prev.map((f) => (f.status === 'processing' ? { ...f, status: finishedStatus } : f))
+      );
     }
 
-    // 安全網：標記所有其他仍在 processing 的檔案為 done
-    processingFiles.forEach((pf) => {
-      if (pf.id !== targetFileId) {
-        setFiles((prev) =>
-          prev.map((f) => (f.id === pf.id ? { ...f, status: 'done' as const } : f))
-        );
-      }
-    });
+    // 使用者主動停止 → 將所有 queued 檔案標記為 idle，停止佇列處理
+    if (wasStopped) {
+      setFiles((prev) =>
+        prev.map((f) => (f.status === 'queued' ? { ...f, status: 'idle' as const } : f))
+      );
+      processingQueueRef.current = false;
+      const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
+      console.log(`[PDFExtractApp][${ts}] 🛑 Queue stopped by user, queued files marked as idle`);
+      return;
+    }
 
-    // 處理佇列中的下一個 queued 檔案
-    const hasProcessingOrTarget = targetFileId || processingFiles.length > 0;
-    if (hasProcessingOrTarget) {
-      setTimeout(() => {
-        const latestFiles = filesRef.current;
-        const nextQueued = latestFiles.find((f) => f.status === 'queued');
-        if (nextQueued) {
-          setFiles((prev) =>
-            prev.map((f) => (f.id === nextQueued.id ? { ...f, status: 'processing' as const } : f))
-          );
-          // 如果已在該檔案，直接啟動分析（handleDocumentLoad 不會再觸發）
-          if (nextQueued.id === activeFileIdRef.current && nextQueued.numPages > 0) {
-            const pagesToAnalyze = Math.max(1, nextQueued.numPages - skipLastPages);
-            analyzeAllPages(pagesToAnalyze, prompt, model, batchSize, nextQueued.id, nextQueued.url);
-          } else {
-            // 切到該檔案，handleDocumentLoad 會啟動分析
-            setActiveFileId(nextQueued.id);
-          }
-        } else {
-          processingQueueRef.current = false;
-        }
-      }, 100);
+    // Pool 結束，檢查是否有在 pool 運行期間新增的 queued 檔案
+    if (targetFileId || processingFiles.length > 0) {
+      const remainingQueued = filesRef.current.some((f) => f.status === 'queued');
+      if (remainingQueued) {
+        // 有新上傳的 queued 檔案，啟動新的 pool
+        setTimeout(() => processNextInQueue(), 100);
+      } else {
+        processingQueueRef.current = false;
+      }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAnalyzing]);
@@ -473,8 +698,13 @@ export default function PDFExtractApp() {
       invalidateSession();
     }
 
-    // 釋放 URL
+    // 釋放 URL + 清理預載快取
     URL.revokeObjectURL(file.url);
+    const cachedDoc = pdfDocCacheRef.current.get(fileId);
+    if (cachedDoc) {
+      cachedDoc.destroy();
+      pdfDocCacheRef.current.delete(fileId);
+    }
 
     setFiles((prev) => prev.filter((f) => f.id !== fileId));
 
@@ -488,7 +718,6 @@ export default function PDFExtractApp() {
         setActiveFileId(nextFile.id);
       } else {
         setActiveFileId(null);
-        setPageRegions(new Map());
         pdfDocRef.current = null;
       }
       setCurrentPage(1);
@@ -498,12 +727,32 @@ export default function PDFExtractApp() {
     console.log(`[PDFExtractApp][${ts}] 🗑️ Removed file: ${file.name}`);
   }, [activeFileId, invalidateSession]);
 
+  // === 清空所有檔案 ===
+  const handleClearAll = useCallback(() => {
+    // 中斷進行中的分析
+    invalidateSession();
+
+    // 釋放所有 URL + 清理預載快取
+    for (const file of filesRef.current) {
+      URL.revokeObjectURL(file.url);
+    }
+    pdfDocCacheRef.current.forEach((doc) => doc.destroy());
+    pdfDocCacheRef.current.clear();
+
+    setFiles([]);
+    setActiveFileId(null);
+    pdfDocRef.current = null;
+
+    const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
+    console.log(`[PDFExtractApp][${ts}] 🗑️ Cleared all files`);
+  }, [invalidateSession]);
+
   // === 更新單一區域的 bbox（拖動/resize 後）→ 標記 userModified + 自動重新提取文字 ===
   const handleRegionUpdate = useCallback(
     async (page: number, regionId: number, newBbox: [number, number, number, number]) => {
       const { extractTextForRegions } = await import('@/lib/pdfTextExtract');
 
-      setPageRegions((prev) => {
+      updateActiveFileRegions((prev) => {
         const updated = new Map(prev);
         const regions = updated.get(page);
         if (regions) {
@@ -521,7 +770,7 @@ export default function PDFExtractApp() {
         const tempRegion: Region = { id: regionId, bbox: newBbox, label: '', text: '' };
         const [extracted] = await extractTextForRegions(pdfPage, [tempRegion]);
 
-        setPageRegions((prev) => {
+        updateActiveFileRegions((prev) => {
           const updated = new Map(prev);
           const regions = updated.get(page);
           if (regions) {
@@ -539,12 +788,12 @@ export default function PDFExtractApp() {
         console.warn(`[PDFExtractApp] ⚠️ Failed to re-extract text for page ${page} region ${regionId}`, e);
       }
     },
-    []
+    [updateActiveFileRegions]
   );
 
   // === 刪除單一 region ===
   const handleRegionRemove = useCallback((page: number, regionId: number) => {
-    setPageRegions((prev) => {
+    updateActiveFileRegions((prev) => {
       const updated = new Map(prev);
       const regions = updated.get(page);
       if (regions) {
@@ -559,17 +808,17 @@ export default function PDFExtractApp() {
     });
     const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
     console.log(`[PDFExtractApp][${ts}] 🗑️ Removed region ${regionId} from page ${page}`);
-  }, []);
+  }, [updateActiveFileRegions]);
 
   // === 新增 region（使用者在 PDF 上手動畫框）===
   const handleRegionAdd = useCallback(
     async (page: number, bbox: [number, number, number, number]) => {
       const { extractTextForRegions } = await import('@/lib/pdfTextExtract');
 
-      const newId = (() => {
-        const regions = pageRegions.get(page) || [];
-        return regions.reduce((max, r) => Math.max(max, r.id), 0) + 1;
-      })();
+      // 從 filesRef 讀取最新 regions 計算 newId（避免 closure stale）
+      const currentFile = filesRef.current.find((f) => f.id === activeFileIdRef.current);
+      const currentRegions = currentFile?.pageRegions.get(page) || [];
+      const newId = currentRegions.reduce((max, r) => Math.max(max, r.id), 0) + 1;
 
       const newRegion: Region = {
         id: newId,
@@ -579,7 +828,7 @@ export default function PDFExtractApp() {
         userModified: true,
       };
 
-      setPageRegions((prev) => {
+      updateActiveFileRegions((prev) => {
         const updated = new Map(prev);
         const existing = updated.get(page) || [];
         const [nx1, ny1] = bbox;
@@ -602,7 +851,7 @@ export default function PDFExtractApp() {
         if (!pdfDocRef.current) return;
         const pdfPage = await pdfDocRef.current.getPage(page);
         const [extracted] = await extractTextForRegions(pdfPage, [newRegion]);
-        setPageRegions((prev) => {
+        updateActiveFileRegions((prev) => {
           const updated = new Map(prev);
           const regions = updated.get(page);
           if (regions) {
@@ -619,17 +868,17 @@ export default function PDFExtractApp() {
       const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
       console.log(`[PDFExtractApp][${ts}] ➕ Added new region ${newId} on page ${page}`);
     },
-    [pageRegions]
+    [updateActiveFileRegions]
   );
 
   // === 重新排序某頁的 regions ===
   const handleReorderRegions = useCallback((page: number, reorderedRegions: Region[]) => {
-    setPageRegions((prev) => {
+    updateActiveFileRegions((prev) => {
       const updated = new Map(prev);
       updated.set(page, reorderedRegions);
       return updated;
     });
-  }, []);
+  }, [updateActiveFileRegions]);
 
   // === 點擊文字框 → 滾動 PDF 到對應框 ===
   const handleClickRegion = useCallback((regionKey: string) => {
@@ -637,19 +886,31 @@ export default function PDFExtractApp() {
     requestAnimationFrame(() => setScrollTarget(regionKey));
   }, []);
 
-  // === 計算當前頁面之前所有頁面的 region 數量（用於跨頁顏色累計）===
-  const getGlobalColorOffset = useCallback(
-    (page: number): number => {
-      let offset = 0;
-      const sortedPages = Array.from(pageRegions.keys()).sort((a, b) => a - b);
-      for (const p of sortedPages) {
-        if (p >= page) break;
-        offset += pageRegions.get(p)?.length ?? 0;
+
+  // === 多 PdfViewer 預掛載：以活躍檔案為中心，前後展開最多 PDF_CACHE_MAX（7）個 ===
+  // 檔案數 ≤ 7 時全部掛載，超過時以活躍檔案為中心的滑動視窗
+  const mountedFileIds = useMemo(() => {
+    const ids = new Set<string>();
+    if (files.length <= PDF_CACHE_MAX) {
+      // 檔案數量在上限內，全部掛載 → 任意方向切換零延遲
+      for (const f of files) ids.add(f.id);
+    } else {
+      // 超過上限，以活躍檔案為中心前後展開
+      const currentIdx = Math.max(0, files.findIndex((f) => f.id === activeFileId));
+      const half = Math.floor(PDF_CACHE_MAX / 2);
+      let start = Math.max(0, currentIdx - half);
+      let end = start + PDF_CACHE_MAX;
+      if (end > files.length) {
+        end = files.length;
+        start = Math.max(0, end - PDF_CACHE_MAX);
       }
-      return offset;
-    },
-    [pageRegions]
-  );
+      for (let i = start; i < end; i++) {
+        ids.add(files[i].id);
+      }
+    }
+    return ids;
+  }, [files, activeFileId]);
+
 
   // 分析中的檔案名（可能不是活躍檔案）
   const analysisFileName = (() => {
@@ -704,6 +965,7 @@ export default function PDFExtractApp() {
           activeFileId={activeFileId}
           onSelectFile={handleSelectFile}
           onRemoveFile={handleRemoveFile}
+          onClearAll={handleClearAll}
         />
       </div>
 
@@ -725,40 +987,88 @@ export default function PDFExtractApp() {
           onSkipLastPagesChange={setSkipLastPages}
           isAnalyzing={isAnalyzing}
           progress={analysisProgress}
+          numPages={numPages}
           onReanalyze={() => {
             if (!activeFileId || !activeFile) return;
             // 設為 processing 讓檔案列表顯示轉圈
             setFiles((prev) =>
               prev.map((f) => (f.id === activeFileId ? { ...f, status: 'processing' as const } : f))
             );
-            handleReanalyze(Math.max(1, numPages - skipLastPages), activeFileId, activeFile.url);
+            // 若檔案已有券商名且在 brokerSkipMap 中有設定，優先使用券商特定值
+            const effectiveSkipRe = (activeFile.report && brokerSkipMap[activeFile.report] !== undefined)
+              ? brokerSkipMap[activeFile.report]
+              : skipLastPages;
+            handleReanalyze(Math.max(1, numPages - effectiveSkipRe), activeFileId, activeFile.url);
           }}
           onStop={handleStop}
           hasFile={!!activeFile}
           error={error}
           fileName={analysisFileName}
+          report={activeFile?.report ?? null}
+          brokerSkipMap={brokerSkipMap}
+          onBrokerSkipMapChange={setBrokerSkipMap}
         />
       </div>
 
       {/* 左側分界線 */}
       <Divider side="left" />
 
-      {/* 中間面板 — PDF 顯示 + Bounding Boxes（連續頁面） */}
-      <PdfViewer
-        pdfUrl={pdfUrl}
-        numPages={numPages}
-        pageRegions={pageRegions}
-        hoveredRegionId={hoveredRegionId}
-        onHover={setHoveredRegionId}
-        onDocumentLoad={handleDocumentLoad}
-        onRegionUpdate={handleRegionUpdate}
-        onRegionRemove={handleRegionRemove}
-        onRegionAdd={handleRegionAdd}
-        getGlobalColorOffset={getGlobalColorOffset}
-        scrollToRegionKey={scrollTarget}
-        onReanalyzePage={(pageNum: number) => handleReanalyzePage(pageNum, activeFileId ?? undefined)}
-        onRegionDoubleClick={handleRegionDoubleClick}
-      />
+      {/* 中間面板 — 多 PdfViewer stacking（preload window 內的檔案同時掛載，CSS visibility 切換） */}
+      <div className="flex-1 relative overflow-hidden">
+        {files.filter((f) => mountedFileIds.has(f.id)).map((file) => {
+          const isActive = file.id === activeFileId;
+          const fileAnalyzingPages = analyzingPagesMap.get(file.id) ?? EMPTY_SET;
+          const fileQueuedPages = queuedPagesMap.get(file.id) ?? EMPTY_SET;
+
+          // per-file getGlobalColorOffset（用各檔案自己的 pageRegions 計算配色偏移）
+          const fileGetGlobalColorOffset = (page: number): number => {
+            let offset = 0;
+            const sorted = Array.from(file.pageRegions.keys()).sort((a, b) => a - b);
+            for (const p of sorted) {
+              if (p >= page) break;
+              offset += file.pageRegions.get(p)?.length ?? 0;
+            }
+            return offset;
+          };
+
+          return (
+            <div
+              key={file.id}
+              style={{
+                position: 'absolute',
+                inset: 0,
+                visibility: isActive ? 'visible' : 'hidden',
+                pointerEvents: isActive ? 'auto' : 'none',
+                zIndex: isActive ? 1 : 0,
+              }}
+            >
+              <PdfViewer
+                pdfUrl={file.url}
+                numPages={file.numPages}
+                pageRegions={file.pageRegions}
+                hoveredRegionId={isActive ? hoveredRegionId : null}
+                onHover={setHoveredRegionId}
+                onDocumentLoad={(pdf: pdfjs.PDFDocumentProxy) => handleDocumentLoadForFile(file.id, pdf)}
+                onRegionUpdate={handleRegionUpdate}
+                onRegionRemove={handleRegionRemove}
+                onRegionAdd={handleRegionAdd}
+                getGlobalColorOffset={fileGetGlobalColorOffset}
+                scrollToRegionKey={isActive ? scrollTarget : null}
+                onReanalyzePage={(pageNum: number) => handleReanalyzePage(pageNum, file.id)}
+                analyzingPages={fileAnalyzingPages}
+                queuedPages={fileQueuedPages}
+                onCancelQueuedPage={(pageNum: number) => cancelQueuedPage(file.id, pageNum)}
+                onRegionDoubleClick={(page: number, regionId: number) => {
+                  const region = file.pageRegions.get(page)?.find((r) => r.id === regionId);
+                  if (region) {
+                    handleRegionDoubleClick(page, region, file.id);
+                  }
+                }}
+              />
+            </div>
+          );
+        })}
+      </div>
 
       {/* 右側分界線 */}
       <Divider side="right" />
@@ -779,3 +1089,4 @@ export default function PDFExtractApp() {
     </div>
   );
 }
+ 

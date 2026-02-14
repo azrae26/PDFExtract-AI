@@ -40,6 +40,7 @@ export default function TextPanel({
 
   // === 複製成功提示 ===
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  const [copiedAll, setCopiedAll] = useState(false);
 
   // === 雙擊右鍵刪除 ===
   const lastRightClickRef = useRef<{ key: string; time: number }>({ key: '', time: 0 });
@@ -76,14 +77,8 @@ export default function TextPanel({
 
     const fullText = lines.join('\n').trim();
     navigator.clipboard.writeText(fullText).then(() => {
-      const btn = document.getElementById('copy-all-btn');
-      if (btn) {
-        const original = btn.textContent;
-        btn.textContent = '已複製!';
-        setTimeout(() => {
-          btn.textContent = original;
-        }, 1500);
-      }
+      setCopiedAll(true);
+      setTimeout(() => setCopiedAll(false), 1500);
     });
   }, [pageRegions]);
 
@@ -123,15 +118,34 @@ export default function TextPanel({
   return (
     <div className="w-full h-full flex flex-col border-l border-gray-200 bg-white overflow-hidden">
       {/* 標題列 */}
-      <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 bg-gray-50">
+      <div className="flex items-center justify-between px-4 h-11 border-b border-gray-200 bg-gray-50 flex-shrink-0">
         <h2 className="text-sm font-semibold text-gray-700">提取文字</h2>
         {hasContent && (
           <button
             id="copy-all-btn"
             onClick={handleCopyAll}
-            className="text-xs px-2.5 py-1 rounded bg-blue-50 text-blue-600 hover:bg-blue-100 transition-colors cursor-pointer"
+            className={`flex items-center gap-1 text-xs font-medium px-3 py-1.5 rounded-md shadow-sm hover:shadow transition-all cursor-pointer ${
+              copiedAll
+                ? 'bg-green-500 text-white'
+                : 'bg-blue-500 text-white hover:bg-blue-600 active:bg-blue-700'
+            }`}
           >
-            複製全部
+            {copiedAll ? (
+              <>
+                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                </svg>
+                已複製!
+              </>
+            ) : (
+              <>
+                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+                  <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" />
+                </svg>
+                複製全部
+              </>
+            )}
           </button>
         )}
       </div>
@@ -244,7 +258,7 @@ export default function TextPanel({
                         </div>
                       )}
                       {/* 文字內容 */}
-                      <p className="text-sm text-gray-800 leading-relaxed whitespace-pre-wrap break-words">
+                      <p className="text-[13px] text-gray-800 leading-relaxed whitespace-pre-wrap break-words">
                         {region.text}
                       </p>
 

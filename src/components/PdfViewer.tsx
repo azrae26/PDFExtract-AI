@@ -1,6 +1,6 @@
 /**
  * 功能：中間 PDF 顯示面板（連續頁面模式）
- * 職責：將所有 PDF 頁面依序往下排列顯示、每頁疊加可互動的 bounding boxes
+ * 職責：將所有 PDF 頁面依序往下排列顯示、每頁疊加可互動的 bounding boxes、每頁右側顯示分析/排隊/重跑按鈕
  * 依賴：react-pdf、BoundingBox 組件、types.ts
  */
 
@@ -39,6 +39,12 @@ interface PdfViewerProps {
   onReanalyzePage: (page: number) => void;
   /** 雙擊框框 → 截圖送 AI 識別 */
   onRegionDoubleClick: (page: number, regionId: number) => void;
+  /** 正在分析中的頁碼集合（按鈕顯示旋轉動畫） */
+  analyzingPages: Set<number>;
+  /** 排隊等待分析的頁碼集合（按鈕顯示 X 取消） */
+  queuedPages: Set<number>;
+  /** 取消佇列中的單頁 */
+  onCancelQueuedPage: (page: number) => void;
 }
 
 export default function PdfViewer({
@@ -55,6 +61,9 @@ export default function PdfViewer({
   scrollToRegionKey,
   onReanalyzePage,
   onRegionDoubleClick,
+  analyzingPages,
+  queuedPages,
+  onCancelQueuedPage,
 }: PdfViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [pageWidth, setPageWidth] = useState(600);
@@ -296,10 +305,10 @@ export default function PdfViewer({
   return (
     <div
       ref={containerRef}
-      className="flex-1 relative flex flex-col items-center bg-gray-100 overflow-hidden"
+      className="h-full relative flex flex-col items-center bg-gray-100 overflow-hidden"
     >
       {/* PDF 連續顯示區域 */}
-      <div ref={scrollRef} className="flex-1 overflow-y-auto overflow-x-hidden flex flex-col items-center p-6 gap-4 w-full">
+      <div ref={scrollRef} className="flex-1 overflow-y-auto overflow-x-hidden flex flex-col items-center pt-3 px-6 pb-6 gap-4 w-full">
         {pdfUrl ? (
           <Document
             file={pdfUrl}
@@ -333,15 +342,40 @@ export default function PdfViewer({
                   </div>
 
                   {/* 重跑按鈕 — 右邊中間（凸出頁面一半） */}
-                  <button
-                    onClick={() => onReanalyzePage(pageNum)}
-                    className="absolute top-1/2 -translate-y-1/2 -right-[18px] w-9 h-9 rounded-full bg-white text-gray-500 shadow-md border border-gray-200 flex items-center justify-center hover:bg-blue-500 hover:text-white hover:border-blue-500 hover:shadow-lg active:scale-90 z-20 transition-all duration-150 cursor-pointer"
-                    title={`重新分析第 ${pageNum} 頁`}
-                  >
-                    <svg className="w-4.5 h-4.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                    </svg>
-                  </button>
+                  {analyzingPages.has(pageNum) ? (
+                    /* 分析中：旋轉動畫 */
+                    <div
+                      className="absolute top-1/2 -translate-y-1/2 -right-[18px] w-9 h-9 rounded-full bg-blue-500 text-white shadow-lg border border-blue-500 flex items-center justify-center z-20"
+                      title={`第 ${pageNum} 頁分析中...`}
+                    >
+                      <svg className="w-4.5 h-4.5 animate-spin" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                      </svg>
+                    </div>
+                  ) : queuedPages.has(pageNum) ? (
+                    /* 排隊中：顯示 X 可取消 */
+                    <button
+                      onClick={() => onCancelQueuedPage(pageNum)}
+                      className="absolute top-1/2 -translate-y-1/2 -right-[18px] w-9 h-9 rounded-full bg-amber-100 text-amber-600 shadow-md border border-amber-300 flex items-center justify-center hover:bg-red-500 hover:text-white hover:border-red-500 hover:shadow-lg active:scale-90 z-20 transition-all duration-150 cursor-pointer"
+                      title={`第 ${pageNum} 頁排隊中，點擊取消`}
+                    >
+                      <svg className="w-4.5 h-4.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                      </svg>
+                    </button>
+                  ) : (
+                    /* 正常狀態：可點擊重跑 */
+                    <button
+                      onClick={() => onReanalyzePage(pageNum)}
+                      className="absolute top-1/2 -translate-y-1/2 -right-[18px] w-9 h-9 rounded-full bg-white text-gray-500 shadow-md border border-gray-200 flex items-center justify-center hover:bg-blue-500 hover:text-white hover:border-blue-500 hover:shadow-lg active:scale-90 z-20 transition-all duration-150 cursor-pointer"
+                      title={`重新分析第 ${pageNum} 頁`}
+                    >
+                      <svg className="w-4.5 h-4.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                      </svg>
+                    </button>
+                  )}
 
                   {/* 只渲染可見頁面的 PDF canvas，遠處的頁面用佔位 div 節省記憶體 */}
                   {isVisible ? (

@@ -1,6 +1,6 @@
 /**
  * 功能：Gemini API 分析端點
- * 職責：接收 PDF 頁面圖片 + Prompt，呼叫 Gemini API 回傳標註區域
+ * 職責：接收 PDF 頁面圖片 + Prompt，呼叫 Gemini API 回傳標註區域與券商名（report）
  * 依賴：@google/generative-ai、環境變數 GEMINI_API_KEY
  */
 
@@ -60,7 +60,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<AnalyzeRe
     const parsed = JSON.parse(jsonStr);
 
     console.log(
-      `[AnalyzeRoute][${timestamp}] ✅ Page ${page}: hasAnalysis=${parsed.hasAnalysis}, regions=${parsed.regions?.length ?? 0}`
+      `[AnalyzeRoute][${timestamp}] ✅ Page ${page}: hasAnalysis=${parsed.hasAnalysis}, regions=${parsed.regions?.length ?? 0}${parsed.report ? `, report=${parsed.report}` : ''}`
     );
 
     return NextResponse.json({
@@ -68,6 +68,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<AnalyzeRe
       data: {
         page,
         hasAnalysis: parsed.hasAnalysis ?? false,
+        report: parsed.report ?? undefined,
         regions: (parsed.regions ?? []).map((r: Record<string, unknown>, i: number) => {
           // Gemini 原生 bbox 格式為 [y1, x1, y2, x2]，轉換為前端使用的 [x1, y1, x2, y2]
           const raw = (r.bbox as number[]) ?? [0, 0, 0, 0];

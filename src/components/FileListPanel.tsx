@@ -13,6 +13,7 @@ interface FileListPanelProps {
   activeFileId: string | null;
   onSelectFile: (fileId: string) => void;
   onRemoveFile: (fileId: string) => void;
+  onClearAll: () => void;
 }
 
 /** 狀態圖示 */
@@ -36,6 +37,18 @@ function StatusIcon({ status }: { status: FileEntry['status'] }) {
           </svg>
         </span>
       );
+    case 'stopped':
+      return (
+        <span className="flex-shrink-0" title="中斷">
+          <svg className="w-4 h-4 text-orange-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M10 9v6m4-6v6m7-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+        </span>
+      );
+    case 'idle':
+      return (
+        <span className="flex-shrink-0 w-4 h-4 rounded-full border-2 border-dashed border-gray-300" title="還沒跑" />
+      );
     case 'error':
       return (
         <span className="flex-shrink-0" title="錯誤">
@@ -52,17 +65,27 @@ export default function FileListPanel({
   activeFileId,
   onSelectFile,
   onRemoveFile,
+  onClearAll,
 }: FileListPanelProps) {
   return (
     <div className="h-full flex flex-col bg-gray-50 border-r border-gray-200 overflow-hidden">
-      {/* 標題 */}
-      <div className="px-4 py-3 border-b border-gray-200 bg-white">
+      {/* 標題 + 清空按鈕 */}
+      <div className="px-4 h-11 border-b border-gray-200 bg-gray-50 flex items-center justify-between flex-shrink-0">
         <h2 className="text-sm font-semibold text-gray-500">
           檔案列表
           {files.length > 0 && (
             <span className="ml-1.5 text-gray-400 font-normal">({files.length})</span>
           )}
         </h2>
+        {files.length > 0 && (
+          <button
+            onClick={onClearAll}
+            className="px-1.5 py-0.5 text-[13px] rounded text-red-400 hover:text-white hover:bg-red-500 transition-colors cursor-pointer"
+            title="清空所有檔案"
+          >
+            清空
+          </button>
+        )}
       </div>
 
       {/* 檔案列表 */}
@@ -93,6 +116,8 @@ export default function FileListPanel({
                         {entry.status === 'done' && `${entry.numPages} 頁`}
                         {entry.status === 'processing' && '分析中...'}
                         {entry.status === 'queued' && '等待中'}
+                        {entry.status === 'stopped' && '已中斷'}
+                        {entry.status === 'idle' && '還沒跑'}
                         {entry.status === 'error' && '失敗'}
                       </p>
                     </div>
