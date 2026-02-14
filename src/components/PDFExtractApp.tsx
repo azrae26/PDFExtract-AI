@@ -218,6 +218,9 @@ export default function PDFExtractApp() {
 
   // === PDF Document 預載快取（預載：目前 + 後4份；釋放：超過7份才驅逐，從上方檔案先釋放）===
   const pdfDocCacheRef = useRef<Map<string, pdfjs.PDFDocumentProxy>>(new Map());
+  /** 追蹤由我們自行透過 pdfjs.getDocument() 載入的 doc fileId（可安全 destroy）。
+   *  react-pdf 的 <Document> 內部建立的 doc 不在此 set 中，不可由我們 destroy。 */
+  const selfLoadedDocIdsRef = useRef<Set<string>>(new Set());
   const PDF_PRELOAD_WINDOW = 5; // 預載視窗大小（目前 + 後 4 份）
   const PDF_CACHE_MAX = 7;      // 快取超過此數量才開始驅逐
 
@@ -281,6 +284,7 @@ export default function PDFExtractApp() {
         pages = tempDoc.numPages;
         // 存入快取（避免重複載入）
         pdfDocCacheRef.current.set(nextQueued.id, tempDoc);
+        selfLoadedDocIdsRef.current.add(nextQueued.id); // 標記為自行載入（可安全 destroy）
         setFiles((prev) =>
           prev.map((f) => (f.id === nextQueued.id ? { ...f, numPages: pages } : f))
         );
@@ -368,6 +372,7 @@ export default function PDFExtractApp() {
           return;
         }
         cache.set(fid, doc);
+        selfLoadedDocIdsRef.current.add(fid); // 標記為自行載入（可安全 destroy）
 
         // 順便更新 numPages（若為 0）
         const entry = filesRef.current.find((f) => f.id === fid);
@@ -407,7 +412,11 @@ export default function PDFExtractApp() {
         if (toEvict <= 0) break;
         const doc = cache.get(fid);
         if (doc) {
-          doc.destroy();
+          // 只 destroy 由我們自行載入的 doc；react-pdf 內部建立的 doc 由 react-pdf 自行管理生命週期
+          if (selfLoadedDocIdsRef.current.has(fid)) {
+            doc.destroy();
+            selfLoadedDocIdsRef.current.delete(fid);
+          }
           cache.delete(fid);
           toEvict--;
         }
@@ -702,7 +711,11 @@ export default function PDFExtractApp() {
     URL.revokeObjectURL(file.url);
     const cachedDoc = pdfDocCacheRef.current.get(fileId);
     if (cachedDoc) {
-      cachedDoc.destroy();
+      // 只 destroy 由我們自行載入的 doc；react-pdf 的 doc 由其元件 unmount 時自行清理
+      if (selfLoadedDocIdsRef.current.has(fileId)) {
+        cachedDoc.destroy();
+        selfLoadedDocIdsRef.current.delete(fileId);
+      }
       pdfDocCacheRef.current.delete(fileId);
     }
 
@@ -736,8 +749,14 @@ export default function PDFExtractApp() {
     for (const file of filesRef.current) {
       URL.revokeObjectURL(file.url);
     }
-    pdfDocCacheRef.current.forEach((doc) => doc.destroy());
+    // 只 destroy 由我們自行載入的 doc；react-pdf 的 doc 由其元件 unmount 時自行清理
+    pdfDocCacheRef.current.forEach((doc, fid) => {
+      if (selfLoadedDocIdsRef.current.has(fid)) {
+        doc.destroy();
+      }
+    });
     pdfDocCacheRef.current.clear();
+    selfLoadedDocIdsRef.current.clear();
 
     setFiles([]);
     setActiveFileId(null);

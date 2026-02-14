@@ -215,6 +215,17 @@ export default function PdfViewer({
     [pageWidth]
   );
 
+  // Page 載入失敗 — 靜默處理 destroyed document 的 race condition（sendWithPromise null error）
+  const handlePageError = useCallback((error: Error) => {
+    // 忽略 document 已被 destroy 導致的 getPage 錯誤（race condition，非真正的問題）
+    if (error?.message?.includes('sendWithPromise') || error?.message?.includes('transport destroyed')) {
+      const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
+      console.warn(`[PdfViewer][${ts}] ⚠️ Page load skipped (document destroyed, race condition):`, error.message);
+      return;
+    }
+    console.error('[PdfViewer] Page load error:', error);
+  }, []);
+
   // 當 scrollToRegionKey 變化時，滾動到對應頁面讓框框在畫面內
   useEffect(() => {
     if (!scrollToRegionKey) return;
@@ -385,6 +396,7 @@ export default function PdfViewer({
                       renderTextLayer={false}
                       renderAnnotationLayer={false}
                       onLoadSuccess={(page) => handlePageLoad(pageNum, page)}
+                      onLoadError={handlePageError}
                       loading={
                         <div
                           className="flex items-center justify-center bg-white"

@@ -472,13 +472,16 @@ export default function useAnalysis({
         const pdfDoc = pdfDocMap.get(fileId);
         if (!pdfDoc) return;
 
-        // 檢查是否被使用者取消
+        // 檢查是否被使用者取消（或券商忽略末尾頁數）
+        // 被跳過的頁面：減少 total 而非增加 completed（不假裝已完成）
         if (skippedPagesRef.current.get(fileId)?.has(pageNum)) {
-          globalCompleted++;
-          const fileDone = (completedPerFile.get(fileId) || 0) + 1;
-          completedPerFile.set(fileId, fileDone);
+          globalTotal--;
+          const fileTotal = (totalPerFile.get(fileId) || 1) - 1;
+          totalPerFile.set(fileId, fileTotal);
           setAnalysisProgress({ current: globalCompleted, total: globalTotal });
-          if (fileDone >= (totalPerFile.get(fileId) || 0)) handleFileDone(fileId);
+          // 檢查此檔案是否全部完成（已完成數 >= 減少後的總數）
+          const fileDone = completedPerFile.get(fileId) || 0;
+          if (fileTotal <= 0 || fileDone >= fileTotal) handleFileDone(fileId);
           return;
         }
 
