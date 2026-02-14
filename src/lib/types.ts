@@ -1,6 +1,6 @@
 /**
  * 功能：PDFExtract AI 共用型別定義
- * 職責：定義 API 請求/回應、區域標註、頁面分析等資料結構
+ * 職責：定義 API 請求/回應、區域標註、頁面分析、多檔案管理等資料結構
  */
 
 /** 單一標註區域 */
@@ -38,6 +38,24 @@ export interface AnalyzeResponse {
   success: boolean;
   data?: PageAnalysis;
   error?: string;
+}
+
+/** 多檔案管理：單一檔案條目 */
+export interface FileEntry {
+  /** 唯一識別碼 */
+  id: string;
+  /** 原始 File 物件 */
+  file: File;
+  /** Object URL（用於 react-pdf 顯示） */
+  url: string;
+  /** 檔名 */
+  name: string;
+  /** 處理狀態 */
+  status: 'queued' | 'processing' | 'done' | 'error';
+  /** 總頁數（PDF 載入後才知道） */
+  numPages: number;
+  /** 各頁分析結果 */
+  pageRegions: Map<number, Region[]>;
 }
 
 /** Bounding Box 顏色定義 */
