@@ -1,0 +1,446 @@
+/**
+ * 功能：中間 PDF 顯示面板（連續頁面模式）
+ * 職責：將所有 PDF 頁面依序往下排列顯示、每頁疊加可互動的 bounding boxes
+ * 依賴：react-pdf、BoundingBox 組件、types.ts
+ */
+
+'use client';
+
+import { useState, useRef, useCallback, useEffect, useMemo, MouseEvent as ReactMouseEvent } from 'react';
+import { Document, Page, pdfjs } from 'react-pdf';
+import 'react-pdf/dist/Page/AnnotationLayer.css';
+import BoundingBox from './BoundingBox';
+import { Region } from '@/lib/types';
+import { NORMALIZED_MAX } from '@/lib/constants';
+
+// PDF.js worker 由 PDFExtractApp 統一設定，這裡不重複
+
+/** 預設寬高比（A4）— 頁面尚未載入時用於佔位 */
+const DEFAULT_RATIO = 1.414;
+
+interface PdfViewerProps {
+  pdfUrl: string | null;
+  numPages: number;
+  /** 所有頁面的 regions */
+  pageRegions: Map<number, Region[]>;
+  hoveredRegionId: string | null;
+  onHover: (regionId: string | null) => void;
+  onDocumentLoad: (pdf: pdfjs.PDFDocumentProxy) => void;
+  onRegionUpdate: (page: number, regionId: number, newBbox: [number, number, number, number]) => void;
+  /** 刪除 region */
+  onRegionRemove: (page: number, regionId: number) => void;
+  /** 新增 region（使用者在空白處畫框） */
+  onRegionAdd: (page: number, bbox: [number, number, number, number]) => void;
+  /** 計算某頁之前所有頁面 region 數量（配色偏移量） */
+  getGlobalColorOffset: (page: number) => number;
+  /** 要滾動到的 regionKey（格式 "page-regionId"），變化時觸發 scrollIntoView */
+  scrollToRegionKey: string | null;
+  /** 重新分析單頁 */
+  onReanalyzePage: (page: number) => void;
+  /** 雙擊框框 → 截圖送 AI 識別 */
+  onRegionDoubleClick: (page: number, regionId: number) => void;
+}
+
+export default function PdfViewer({
+  pdfUrl,
+  numPages,
+  pageRegions,
+  hoveredRegionId,
+  onHover,
+  onDocumentLoad,
+  onRegionUpdate,
+  onRegionRemove,
+  onRegionAdd,
+  getGlobalColorOffset,
+  scrollToRegionKey,
+  onReanalyzePage,
+  onRegionDoubleClick,
+}: PdfViewerProps) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [pageWidth, setPageWidth] = useState(600);
+
+  // 每頁容器的 ref（用於 scrollIntoView）
+  const pageElRefs = useRef<Map<number, HTMLDivElement>>(new Map());
+  // 滾動容器 ref
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  // 上方/下方還有幾個框的計數
+  const [aboveCount, setAboveCount] = useState(0);
+  const [belowCount, setBelowCount] = useState(0);
+
+  // === 頁面可見性追蹤（懶載入用） ===
+  const [visiblePages, setVisiblePages] = useState<Set<number>>(new Set());
+  const observerRef = useRef<IntersectionObserver | null>(null);
+
+  // 建立 IntersectionObserver（rootMargin 上下各預載 800px）
+  useEffect(() => {
+    observerRef.current = new IntersectionObserver(
+      (entries) => {
+        setVisiblePages((prev) => {
+          const next = new Set(prev);
+          for (const entry of entries) {
+            const pageNum = Number((entry.target as HTMLElement).dataset.pagenum);
+            if (entry.isIntersecting) next.add(pageNum);
+            else next.delete(pageNum);
+          }
+          return next;
+        });
+      },
+      { root: scrollRef.current, rootMargin: '800px 0px' }
+    );
+
+    return () => {
+      observerRef.current?.disconnect();
+    };
+  }, [pdfUrl]); // pdfUrl 變化時重建
+
+  // ref callback 供每頁 wrapper 使用，同時註冊到 observer + pageElRefs
+  const setPageRef = useCallback((pageNum: number, el: HTMLDivElement | null) => {
+    if (el) {
+      pageElRefs.current.set(pageNum, el);
+      observerRef.current?.observe(el);
+    } else {
+      const old = pageElRefs.current.get(pageNum);
+      if (old) observerRef.current?.unobserve(old);
+      pageElRefs.current.delete(pageNum);
+    }
+  }, []);
+
+  // === 空白處拖曳畫新框 ===
+  const drawingRef = useRef<{ pageNum: number; startX: number; startY: number } | null>(null);
+  const [drawingRect, setDrawingRect] = useState<{ pageNum: number; x: number; y: number; w: number; h: number } | null>(null);
+
+  const handleOverlayMouseDown = useCallback((pageNum: number, dim: { width: number; height: number }, e: ReactMouseEvent) => {
+    // 只在直接點擊覆蓋層時觸發（不是點在 BoundingBox 上）
+    if (e.target !== e.currentTarget) return;
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    drawingRef.current = { pageNum, startX: x, startY: y };
+    setDrawingRect({ pageNum, x, y, w: 0, h: 0 });
+
+    const handleMouseMove = (me: MouseEvent) => {
+      if (!drawingRef.current) return;
+      const curX = me.clientX - rect.left;
+      const curY = me.clientY - rect.top;
+      const sx = drawingRef.current.startX;
+      const sy = drawingRef.current.startY;
+      setDrawingRect({
+        pageNum: drawingRef.current.pageNum,
+        x: Math.min(sx, curX),
+        y: Math.min(sy, curY),
+        w: Math.abs(curX - sx),
+        h: Math.abs(curY - sy),
+      });
+    };
+
+    const handleMouseUp = (me: MouseEvent) => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+      if (!drawingRef.current) return;
+
+      const curX = me.clientX - rect.left;
+      const curY = me.clientY - rect.top;
+      const sx = drawingRef.current.startX;
+      const sy = drawingRef.current.startY;
+      const finalX = Math.min(sx, curX);
+      const finalY = Math.min(sy, curY);
+      const finalW = Math.abs(curX - sx);
+      const finalH = Math.abs(curY - sy);
+
+      // 只有拖出一定大小才建立新框（至少 10px）
+      if (finalW > 10 && finalH > 10) {
+        const bbox: [number, number, number, number] = [
+          Math.round((finalX / dim.width) * NORMALIZED_MAX),
+          Math.round((finalY / dim.height) * NORMALIZED_MAX),
+          Math.round(((finalX + finalW) / dim.width) * NORMALIZED_MAX),
+          Math.round(((finalY + finalH) / dim.height) * NORMALIZED_MAX),
+        ];
+        onRegionAdd(drawingRef.current.pageNum, bbox);
+      }
+
+      drawingRef.current = null;
+      setDrawingRect(null);
+    };
+
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+  }, [onRegionAdd]);
+
+  // 每頁的 pageDim（寬高）
+  const [pageDims, setPageDims] = useState<Map<number, { width: number; height: number }>>(new Map());
+
+  // 根據容器寬度動態調整 PDF 顯示寬度（使用 ResizeObserver 監聽容器尺寸變化）
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+
+    const updateWidth = () => {
+      const availableWidth = el.clientWidth - 48;
+      setPageWidth(Math.max(availableWidth, 100));
+    };
+
+    const observer = new ResizeObserver(updateWidth);
+    observer.observe(el);
+    updateWidth();
+
+    return () => observer.disconnect();
+  }, []);
+
+  // 記錄各頁寬高比（通常各頁一致，但以防萬一）
+  const pageRatiosRef = useRef<Map<number, number>>(new Map());
+
+  // 某頁 PDF 載入完成 — 記錄寬高比並計算顯示尺寸
+  const handlePageLoad = useCallback(
+    (pageNum: number, page: pdfjs.PDFPageProxy) => {
+      const viewport = page.getViewport({ scale: 1 });
+      const ratio = viewport.height / viewport.width;
+      pageRatiosRef.current.set(pageNum, ratio);
+      const displayHeight = pageWidth * ratio;
+      setPageDims((prev) => {
+        const updated = new Map(prev);
+        updated.set(pageNum, { width: pageWidth, height: displayHeight });
+        return updated;
+      });
+    },
+    [pageWidth]
+  );
+
+  // 當 scrollToRegionKey 變化時，滾動到對應頁面讓框框在畫面內
+  useEffect(() => {
+    if (!scrollToRegionKey) return;
+    const pageNum = parseInt(scrollToRegionKey.split('-')[0], 10);
+    if (isNaN(pageNum)) return;
+    const pageEl = pageElRefs.current.get(pageNum);
+    if (pageEl) {
+      pageEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+  }, [scrollToRegionKey]);
+
+  // 計算可視區域上方/下方的 region 數量
+  const updateAboveBelowCounts = useCallback(() => {
+    const scrollEl = scrollRef.current;
+    if (!scrollEl) return;
+
+    const scrollTop = scrollEl.scrollTop;
+    const scrollBottom = scrollTop + scrollEl.clientHeight;
+    let above = 0;
+    let below = 0;
+
+    pageRegions.forEach((regions, pageNum) => {
+      const pageEl = pageElRefs.current.get(pageNum);
+      if (!pageEl || regions.length === 0) return;
+      // pageEl 相對於 scrollEl 的位置
+      const pageTop = pageEl.offsetTop;
+      const pageBottom = pageTop + pageEl.offsetHeight;
+
+      if (pageBottom < scrollTop) {
+        // 整頁在上方
+        above += regions.length;
+      } else if (pageTop > scrollBottom) {
+        // 整頁在下方
+        below += regions.length;
+      } else {
+        // 頁面部分可見 — 用 pageDim 逐框判斷
+        const dim = pageDims.get(pageNum);
+        if (!dim) return;
+        for (const r of regions) {
+          const [, y1, , y2] = r.bbox;
+          const boxTopPx = pageTop + (y1 / 1000) * dim.height;
+          const boxBottomPx = pageTop + (y2 / 1000) * dim.height;
+          if (boxBottomPx < scrollTop) above++;
+          else if (boxTopPx > scrollBottom) below++;
+        }
+      }
+    });
+
+    setAboveCount(above);
+    setBelowCount(below);
+  }, [pageRegions, pageDims]);
+
+  // 監聽滾動事件更新計數（throttle 100ms 避免過度觸發）
+  useEffect(() => {
+    const scrollEl = scrollRef.current;
+    if (!scrollEl) return;
+    let ticking = false;
+    const handler = () => {
+      if (ticking) return;
+      ticking = true;
+      requestAnimationFrame(() => {
+        updateAboveBelowCounts();
+        ticking = false;
+      });
+    };
+    scrollEl.addEventListener('scroll', handler, { passive: true });
+    // 初始計算
+    updateAboveBelowCounts();
+    return () => scrollEl.removeEventListener('scroll', handler);
+  }, [updateAboveBelowCounts]);
+
+  // pageRegions 變化時也重新計算
+  useEffect(() => { updateAboveBelowCounts(); }, [pageRegions, updateAboveBelowCounts]);
+
+  // 當 pageWidth 變化時，同步更新所有已知頁面的 pageDim
+  useEffect(() => {
+    const ratios = pageRatiosRef.current;
+    if (ratios.size === 0) return;
+    setPageDims(() => {
+      const updated = new Map<number, { width: number; height: number }>();
+      ratios.forEach((ratio, pageNum) => {
+        updated.set(pageNum, { width: pageWidth, height: pageWidth * ratio });
+      });
+      return updated;
+    });
+  }, [pageWidth]);
+
+  return (
+    <div
+      ref={containerRef}
+      className="flex-1 relative flex flex-col items-center bg-gray-100 overflow-hidden"
+    >
+      {/* PDF 連續顯示區域 */}
+      <div ref={scrollRef} className="flex-1 overflow-y-auto overflow-x-hidden flex flex-col items-center p-6 gap-4 w-full">
+        {pdfUrl ? (
+          <Document
+            file={pdfUrl}
+            onLoadSuccess={(pdf) => onDocumentLoad(pdf as unknown as pdfjs.PDFDocumentProxy)}
+            loading={
+              <div className="flex items-center justify-center w-[600px] h-[800px] bg-white">
+                <div className="animate-spin w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full" />
+              </div>
+            }
+          >
+            {Array.from({ length: numPages }, (_, i) => i + 1).map((pageNum) => {
+              const regions = pageRegions.get(pageNum) || [];
+              const dim = pageDims.get(pageNum);
+              const colorOffset = getGlobalColorOffset(pageNum);
+              const isVisible = visiblePages.has(pageNum);
+              // 佔位高度：已知 ratio 就用它，否則用預設 A4 比例
+              const ratio = pageRatiosRef.current.get(pageNum) ?? DEFAULT_RATIO;
+              const placeholderHeight = pageWidth * ratio;
+
+              return (
+                <div
+                  key={pageNum}
+                  data-pagenum={pageNum}
+                  ref={(el) => setPageRef(pageNum, el)}
+                  className="relative inline-block shadow-lg mb-2 overflow-visible"
+                  style={{ contain: 'layout style', minHeight: placeholderHeight }}
+                >
+                  {/* 頁碼標籤 */}
+                  <div className="absolute -top-0 left-0 bg-gray-700/70 text-white text-xs px-2 py-0.5 rounded-br z-10">
+                    {pageNum} / {numPages}
+                  </div>
+
+                  {/* 重跑按鈕 — 右邊中間（凸出頁面一半） */}
+                  <button
+                    onClick={() => onReanalyzePage(pageNum)}
+                    className="absolute top-1/2 -translate-y-1/2 -right-[18px] w-9 h-9 rounded-full bg-white text-gray-500 shadow-md border border-gray-200 flex items-center justify-center hover:bg-blue-500 hover:text-white hover:border-blue-500 hover:shadow-lg active:scale-90 z-20 transition-all duration-150 cursor-pointer"
+                    title={`重新分析第 ${pageNum} 頁`}
+                  >
+                    <svg className="w-4.5 h-4.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                    </svg>
+                  </button>
+
+                  {/* 只渲染可見頁面的 PDF canvas，遠處的頁面用佔位 div 節省記憶體 */}
+                  {isVisible ? (
+                    <Page
+                      pageNumber={pageNum}
+                      width={pageWidth}
+                      renderTextLayer={false}
+                      renderAnnotationLayer={false}
+                      onLoadSuccess={(page) => handlePageLoad(pageNum, page)}
+                      loading={
+                        <div
+                          className="flex items-center justify-center bg-white"
+                          style={{ width: pageWidth, height: placeholderHeight }}
+                        >
+                          <div className="animate-spin w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full" />
+                        </div>
+                      }
+                    />
+                  ) : (
+                    <div
+                      className="bg-gray-200"
+                      style={{ width: pageWidth, height: placeholderHeight }}
+                    />
+                  )}
+
+                  {/* Bounding Boxes 覆蓋層（也是畫新框的拖曳目標） */}
+                  {isVisible && dim && dim.width > 0 && (
+                    <div
+                      className="absolute top-0 left-0"
+                      style={{ width: dim.width, height: dim.height, cursor: 'crosshair' }}
+                      onMouseDown={(e) => handleOverlayMouseDown(pageNum, dim, e)}
+                    >
+                      {regions.map((region, index) => {
+                        const regionKey = `${pageNum}-${region.id}`;
+                        return (
+                          <BoundingBox
+                            key={regionKey}
+                            region={region}
+                            colorIndex={colorOffset + index}
+                            displayWidth={dim.width}
+                            displayHeight={dim.height}
+                            isHovered={hoveredRegionId === regionKey}
+                            onHover={() => onHover(regionKey)}
+                            onHoverEnd={() => onHover(null)}
+                            onUpdate={(newBbox) => onRegionUpdate(pageNum, region.id, newBbox)}
+                            onRemove={() => onRegionRemove(pageNum, region.id)}
+                            onDoubleClick={() => onRegionDoubleClick(pageNum, region.id)}
+                          />
+                        );
+                      })}
+
+                      {/* 正在畫的新框預覽 */}
+                      {drawingRect && drawingRect.pageNum === pageNum && drawingRect.w > 0 && drawingRect.h > 0 && (
+                        <div
+                          className="absolute border-2 border-dashed border-blue-500 bg-blue-500/10 pointer-events-none"
+                          style={{
+                            left: drawingRect.x,
+                            top: drawingRect.y,
+                            width: drawingRect.w,
+                            height: drawingRect.h,
+                          }}
+                        />
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </Document>
+        ) : (
+          /* 尚未上傳 PDF 的空狀態 */
+          <div className="flex flex-col items-center justify-center h-full text-gray-400">
+            <svg className="w-20 h-20 mb-4 text-gray-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={1}
+                d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z"
+              />
+            </svg>
+            <p className="text-lg">PDF 預覽區域</p>
+            <p className="text-sm text-gray-300 mt-1">請在左側上傳 PDF 檔案</p>
+          </div>
+        )}
+      </div>
+
+      {/* 上方框數提示 — absolute 覆蓋避免佈局抖動 */}
+      {aboveCount > 0 && (
+        <div className="absolute top-0 left-0 right-0 flex justify-center py-1 bg-gray-800/90 text-white text-sm font-bold z-30 pointer-events-none">
+          ↑ 上方還有 {aboveCount} 個框
+        </div>
+      )}
+
+      {/* 下方框數提示 — absolute 覆蓋避免佈局抖動 */}
+      {belowCount > 0 && (
+        <div className="absolute bottom-0 left-0 right-0 flex justify-center py-1 bg-gray-800/90 text-white text-sm font-bold z-30 pointer-events-none overflow-hidden">
+          ↓ 下方還有 {belowCount} 個框
+        </div>
+      )}
+    </div>
+  );
+}

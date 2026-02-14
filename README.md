@@ -1,36 +1,91 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# PDFExtract AI — PDF 智能文本提取
 
-## Getting Started
+上傳 PDF 檔案，透過 Gemini AI 自動辨識頁面中的分析文本區域，在 PDF 上畫出可拖動、可調整大小的 bounding boxes，並將提取的文字整理顯示。
 
-First, run the development server:
+## 功能特色
+
+- **拖拉上傳**：將 PDF 拖入右側上傳區，自動開始分析
+- **PDF 預覽**：中間面板即時顯示 PDF，支援多頁翻頁
+- **AI 標註**：透過 Gemini 2.0 Flash API 辨識分析文本區域，回傳座標與文字
+- **可互動框**：bounding boxes 可拖動移動、拖角/拖邊改大小
+- **文字提取**：左側面板按頁碼+順序整理所有提取文字，支援一鍵複製
+- **Hover 互動**：左側文字與中間框互相連動高亮
+- **自訂 Prompt**：右側可編輯 Prompt，修改後按「重新分析」即可重跑
+
+## 技術棧
+
+| 項目 | 技術 |
+|------|------|
+| 框架 | Next.js 16 (App Router, Turbopack) |
+| PDF 顯示 | react-pdf (pdfjs-dist) |
+| 可互動框 | react-rnd |
+| AI 分析 | Gemini 2.0 Flash (@google/generative-ai) |
+| 樣式 | Tailwind CSS 4 |
+| 語言 | TypeScript |
+
+## 專案結構
+
+```
+src/
+  app/
+    page.tsx                  — 主頁面（dynamic import，避免 SSR）
+    layout.tsx                — 根佈局
+    globals.css               — 全域樣式
+    api/analyze/route.ts      — Gemini API 端點（Server Side）
+  components/
+    PDFExtractApp.tsx         — 主應用元件（全域狀態管理）
+    PdfUploader.tsx           — 右側面板：拖拉上傳 + Prompt 編輯
+    PdfViewer.tsx             — 中間面板：PDF 顯示 + bounding boxes
+    BoundingBox.tsx           — 可拖動/可 resize 的標註框
+    TextPanel.tsx             — 左側面板：提取文字 + hover 互動
+  lib/
+    types.ts                  — TypeScript 型別定義
+    constants.ts              — 預設 Prompt、顏色配置等常數
+```
+
+## 快速開始
+
+### 1. 安裝依賴
+
+```bash
+cd pdfextract-ai
+npm install
+```
+
+### 2. 設定環境變數
+
+編輯 `.env.local`，填入你的 Gemini API Key：
+
+```
+GEMINI_API_KEY=你的_GEMINI_API_KEY
+```
+
+### 3. 啟動開發伺服器
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+開啟 http://localhost:3000 即可使用。
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## 使用流程
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+1. （可選）在右側修改 Prompt
+2. 將 PDF 檔案拖入右側上傳區
+3. 系統自動：顯示 PDF → 逐頁轉圖片 → 送 Gemini API 分析
+4. 分析完成後，中間 PDF 上出現彩色標註框，左側顯示提取文字
+5. 可拖動/調整框的大小
+6. Hover 左側文字可高亮中間對應的框，反之亦然
+7. 點擊「複製全部」可複製所有提取文字
 
-## Learn More
+## 座標系統
 
-To learn more about Next.js, take a look at the following resources:
+- Gemini API 回傳歸一化座標（0~1000）
+- `(0, 0)` = 圖片左上角，`(1000, 1000)` = 圖片右下角
+- 系統自動將歸一化座標轉換為 PDF 顯示的像素座標
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## 注意事項
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- API Key 不要提交到版本控制（`.env.local` 已在 `.gitignore` 中）
+- 大型 PDF（超過 20 頁）分析時間較長，請耐心等待
+- PDF 轉圖片使用 2x scale + JPEG 85% 品質，平衡解析度與傳輸量
