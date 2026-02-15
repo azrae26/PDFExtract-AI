@@ -157,8 +157,8 @@ export default function PdfViewer({
       const finalW = Math.abs(curX - sx);
       const finalH = Math.abs(curY - sy);
 
-      // 只有拖出一定大小才建立新框（至少 10px）
-      if (finalW > 10 && finalH > 10) {
+      // 只要有拖動就建立新框（寬高 > 0）
+      if (finalW > 0 && finalH > 0) {
         const bbox: [number, number, number, number] = [
           Math.round((finalX / dim.width) * NORMALIZED_MAX),
           Math.round((finalY / dim.height) * NORMALIZED_MAX),

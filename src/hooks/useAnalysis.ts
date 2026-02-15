@@ -485,6 +485,9 @@ export default function useAnalysis({
       const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
       console.log(`[useAnalysis][${ts}] 🔄 Re-analyzing page ${pageNum}...`);
 
+      // 重置 abort 標記（切檔時 invalidateSession 會設為 true，單頁重送需要恢復）
+      abortRef.current = false;
+
       // 累加進度，而非覆蓋
       inFlightPageRef.current++;
       setBatchIsAnalyzing(true);

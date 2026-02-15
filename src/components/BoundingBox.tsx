@@ -97,8 +97,8 @@ export default function BoundingBox({
       position={{ x, y }}
       size={{ width, height }}
       bounds="parent"
-      minWidth={20}
-      minHeight={20}
+      minWidth={15}
+      minHeight={15}
       onDragStop={(_e, d) => {
         const newBbox = pixelToNormalized(d.x, d.y, width, height, displayWidth, displayHeight);
         onUpdate(newBbox);
