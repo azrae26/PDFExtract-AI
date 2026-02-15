@@ -92,6 +92,16 @@ export default function PdfViewer({
     observerRef.current = new IntersectionObserver(
       (entries) => {
         setVisiblePages((prev) => {
+          // 先檢查是否有實際變更，避免 new Set 產生新引用觸發不必要的 re-render
+          let hasChange = false;
+          for (const entry of entries) {
+            const pageNum = Number((entry.target as HTMLElement).dataset.pagenum);
+            if (entry.isIntersecting ? !prev.has(pageNum) : prev.has(pageNum)) {
+              hasChange = true;
+              break;
+            }
+          }
+          if (!hasChange) return prev; // 內容沒變，返回原引用 → React 跳過 re-render
           const next = new Set(prev);
           for (const entry of entries) {
             const pageNum = Number((entry.target as HTMLElement).dataset.pagenum);
@@ -339,7 +349,7 @@ export default function PdfViewer({
       className="h-full relative flex flex-col items-center bg-gray-100 overflow-hidden"
     >
       {/* PDF 連續顯示區域 */}
-      <div ref={scrollRef} className="flex-1 overflow-y-auto overflow-x-hidden flex flex-col items-center pt-3 px-6 pb-6 gap-4 w-full">
+      <div ref={scrollRef} className="flex-1 overflow-y-auto overflow-x-hidden flex flex-col items-center pt-3 px-6 pb-6 gap-4 w-full" style={{ overflowAnchor: 'none' }}>
         {pdfUrl ? (
           <Document
             file={pdfUrl}
@@ -529,3 +539,4 @@ export default function PdfViewer({
     </div>
   );
 }
+
