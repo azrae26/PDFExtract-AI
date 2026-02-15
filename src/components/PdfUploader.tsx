@@ -164,22 +164,22 @@ export default function PdfUploader({
               </span>
             </div>
             {/* 進度統計：已完成 / 分析頁數 / 總頁數 / 券商名（始終顯示） */}
-            <div className={`grid gap-1 text-center ${report ? 'grid-cols-4' : 'grid-cols-3'}`}>
-              <div className="rounded-md bg-green-50 py-1.5">
+            <div className="flex gap-1 text-center">
+              <div className="rounded-md bg-green-50 py-1.5 px-2" style={{ flex: '1 1 auto' }}>
                 <div className="text-lg font-extrabold text-green-600">{progress.current}</div>
                 <div className="text-[9px] text-green-500">已完成</div>
               </div>
-              <div className="rounded-md bg-blue-50 py-1.5">
+              <div className="rounded-md bg-blue-50 py-1.5 px-2" style={{ flex: '1 1 auto' }}>
                 <div className="text-lg font-extrabold text-blue-600">{progress.total}</div>
                 <div className="text-[9px] text-blue-500">分析頁數</div>
               </div>
-              <div className="rounded-md bg-gray-100 py-1.5">
+              <div className="rounded-md bg-gray-100 py-1.5 px-2" style={{ flex: '1 1 auto' }}>
                 <div className="text-lg font-extrabold text-gray-700">{numPages}</div>
                 <div className="text-[9px] text-gray-500">總頁數</div>
               </div>
               {report && (
-                <div className="rounded-md bg-orange-50 py-1.5">
-                  <div className="text-lg font-extrabold text-orange-600 truncate px-1">{report}</div>
+                <div className="rounded-md bg-orange-50 py-1.5 px-2 min-w-0" style={{ flex: '1 1 auto' }}>
+                  <div className="text-lg font-extrabold text-orange-600 truncate">{report}</div>
                   <div className="text-[9px] text-orange-500">券商</div>
                 </div>
               )}

@@ -6,6 +6,7 @@
  *       2.5. enforceMinVerticalGap：擴張後框間上下間距不足時各自退縮，保證最小間距
  *       3. 根據校正後的歸一化座標 (0~1000) 判斷哪些文字落在各個 bbox 內，回傳填入 text 的 Region[]
  *       同一行判定使用 baseline 座標（同一行不同字體大小 baseline 一致，避免 top 座標因字體差異導致誤判同行）
+ *       自適應行分組閾值：微聚類找穩定行估算行距，避免固定閾值在行距緊湊 PDF 中合併相鄰行
  *       同一行內若偵測到明顯水平間距（表格不同欄），自動插入 TAB 分隔
  *       4. splitIntoColumns：偵測 bbox 內多欄佈局（行內 gap 定位法 + 投影法 → baseline 對齊法驗證），分欄後逐欄提取避免左右文字混合
  * 依賴：pdfjs-dist (PDFPageProxy)
@@ -632,79 +633,122 @@ function splitIntoColumns(hits: Hit[]): Hit[][] {
 
 /**
  * 把一組 hits 按閱讀順序排序並拼接成文字
- * 排序：先按 baseline（上→下），baseline 相近的按 X（左→右）
+ * 排序：先按 baseline 分行（聚類），再行內按 X（左→右）
+ * ⚠️ 不能直接用帶 threshold 的 comparator sort（不可傳遞性問題）：
+ *    超連結等異字型的 baseline 微偏，使相鄰行 items 被混為同行後按 X 排序導致交錯
  * 同一行內若偵測到明顯水平間距（表格不同欄），自動插入 TAB
  * 行距突然變大時（段落間距 > 正常行距 × 1.4）自動插入空行
  */
 function formatColumnText(hits: Hit[]): string {
   if (hits.length === 0) return '';
 
-  // 按閱讀順序排序：先按 baseline（上→下），baseline 相近的按 X（左→右）
-  // 使用 baseline 而非 top 座標，因為同一行不同字體大小的文字 baseline 一致
-  hits.sort((a, b) => {
-    const baselineDiff = a.normBaseline - b.normBaseline;
-    if (Math.abs(baselineDiff) < SAME_LINE_THRESHOLD) return a.normX - b.normX;
-    return baselineDiff;
-  });
+  // === Step 1: 按 baseline 排序 ===
+  const sorted = [...hits].sort((a, b) => a.normBaseline - b.normBaseline);
 
-  // 計算各行 baseline，用於偵測段落間距
-  const lineBaselines: number[] = [];
-  let prevBl = -Infinity;
-  for (const hit of hits) {
-    if (prevBl === -Infinity || Math.abs(hit.normBaseline - prevBl) >= SAME_LINE_THRESHOLD) {
-      lineBaselines.push(hit.normBaseline);
-      prevBl = hit.normBaseline;
+  // === Step 2: 自適應行分組閾值 ===
+  // 固定閾值（SAME_LINE_THRESHOLD=15）在行距緊湊的 PDF 中可能 >= 實際行距，
+  // 導致相鄰行被合併後按 X 排序 → 文字交錯。
+  // 解法：先用微聚類（閾值=3）找出穩定行（≥2 items），計算真正的行距，
+  //       再用行距 × 0.7 作為分行閾值。超連結等 baseline 偏移的單 item 被過濾掉，不影響行距估算。
+  let lineThreshold = SAME_LINE_THRESHOLD;
+  if (sorted.length >= 4) {
+    const MICRO_THRESHOLD = 3; // 微聚類閾值：baseline 差 < 3 → 肯定同行
+    const microClusters: { baseline: number; count: number }[] =
+      [{ baseline: sorted[0].normBaseline, count: 1 }];
+    for (let i = 1; i < sorted.length; i++) {
+      const last = microClusters[microClusters.length - 1];
+      if (sorted[i].normBaseline - last.baseline < MICRO_THRESHOLD) {
+        last.count++;
+      } else {
+        microClusters.push({ baseline: sorted[i].normBaseline, count: 1 });
+      }
+    }
+    // 穩定行 = count >= 2 的微聚類（超連結等異字型通常只有 1 個 item）
+    const stableClusters = microClusters.filter(c => c.count >= 2);
+    if (stableClusters.length >= 2) {
+      let minSpacing = Infinity;
+      for (let i = 1; i < stableClusters.length; i++) {
+        minSpacing = Math.min(minSpacing, stableClusters[i].baseline - stableClusters[i - 1].baseline);
+      }
+      if (minSpacing > 3 && minSpacing < SAME_LINE_THRESHOLD) {
+        lineThreshold = Math.max(3, minSpacing * 0.7);
+        const _ts = () => new Date().toLocaleTimeString('en-US', { hour12: false });
+        console.log(
+          `[pdfTextExtract][${_ts()}] 🎯 自適應行閾值: 穩定行=${stableClusters.length}` +
+          `, 最小行距=${minSpacing.toFixed(1)}, 閾值=${lineThreshold.toFixed(1)}` +
+          ` (原=${SAME_LINE_THRESHOLD})`
+        );
+      }
     }
   }
 
-  // 計算相鄰行距的中位數作為「正常行距」基準
+  // === Step 3: 按自適應閾值聚類分行 ===
+  // 用「排序→順序聚類」代替直接帶 threshold 的 sort，避免不可傳遞性：
+  // 超連結 (report) 等異字型的 baseline 微偏 → 直接 sort 時相鄰行 items 混合 → 行交錯
+  const lines: Hit[][] = [[sorted[0]]];
+  for (let i = 1; i < sorted.length; i++) {
+    const lastLine = lines[lines.length - 1];
+    if (sorted[i].normBaseline - lastLine[0].normBaseline < lineThreshold) {
+      lastLine.push(sorted[i]);
+    } else {
+      lines.push([sorted[i]]);
+    }
+  }
+
+  // 每行內按 X 排序（左→右）
+  for (const line of lines) {
+    line.sort((a, b) => a.normX - b.normX);
+  }
+
+  // === Step 4: 計算行距中位數（段落間距偵測） ===
   const PARA_GAP_RATIO = 1.4; // 行距 > 正常行距 × 此倍數 → 段落分隔
   let medianLineGap = 0;
-  if (lineBaselines.length >= 3) {
+  if (lines.length >= 3) {
     const gaps: number[] = [];
-    for (let i = 1; i < lineBaselines.length; i++) {
-      gaps.push(lineBaselines[i] - lineBaselines[i - 1]);
+    for (let i = 1; i < lines.length; i++) {
+      gaps.push(lines[i][0].normBaseline - lines[i - 1][0].normBaseline);
     }
     gaps.sort((a, b) => a - b);
     medianLineGap = gaps[Math.floor(gaps.length / 2)];
 
     const _ts = () => new Date().toLocaleTimeString('en-US', { hour12: false });
     console.log(
-      `[pdfTextExtract][${_ts()}] 📏 行距分析: 行數=${lineBaselines.length}, 中位數=${medianLineGap.toFixed(1)}` +
+      `[pdfTextExtract][${_ts()}] 📏 行距分析: 行數=${lines.length}, 中位數=${medianLineGap.toFixed(1)}` +
       `, 閾值=${(medianLineGap * PARA_GAP_RATIO).toFixed(1)}, 各行距=[${gaps.map(g => g.toFixed(1)).join(',')}]`
     );
   }
 
-  // 拼接文字：同一行的直接拼接，換行用 \n
-  // 同一行內，若兩個文字項間距 > 閾值（表格不同欄），插入 TAB
-  // 較小的 gap（項次編號與正文之間）插入空格
-  // 行距超過中位數 × PARA_GAP_RATIO → 插入空行（段落分隔）
+  // === Step 5: 逐行拼接文字 ===
+  // 行間：行距 > 中位數 × PARA_GAP_RATIO → 空行（段落分隔），否則換行
+  // 行內：間距 > COL_GAP_THRESHOLD → TAB，> SPACE_GAP_THRESHOLD → 空格
   const COL_GAP_THRESHOLD = 30; // 歸一化單位，約頁面寬度 3%
   const SPACE_GAP_THRESHOLD = 3; // 歸一化單位，項次編號後的小間距插入空格
   let text = '';
-  let lastBaseline = -Infinity;
-  let lastRight = -Infinity;
-  for (const hit of hits) {
-    const sameLine = lastBaseline !== -Infinity && Math.abs(hit.normBaseline - lastBaseline) < SAME_LINE_THRESHOLD;
-    if (!sameLine && lastBaseline !== -Infinity) {
-      const lineGap = hit.normBaseline - lastBaseline;
+
+  for (let li = 0; li < lines.length; li++) {
+    // 行間分隔
+    if (li > 0) {
+      const lineGap = lines[li][0].normBaseline - lines[li - 1][0].normBaseline;
       if (medianLineGap > 0 && lineGap > medianLineGap * PARA_GAP_RATIO) {
         text += '\n\n'; // 段落分隔
       } else {
         text += '\n';
       }
-      lastRight = -Infinity;
-    } else if (sameLine && lastRight !== -Infinity) {
-      const gap = hit.normX - lastRight;
-      if (gap > COL_GAP_THRESHOLD) {
-        text += '\t';
-      } else if (gap > SPACE_GAP_THRESHOLD) {
-        text += ' ';
-      }
     }
-    text += hit.str;
-    lastBaseline = hit.normBaseline;
-    lastRight = hit.normRight;
+
+    // 行內拼接
+    const line = lines[li];
+    for (let hi = 0; hi < line.length; hi++) {
+      if (hi > 0) {
+        const gap = line[hi].normX - line[hi - 1].normRight;
+        if (gap > COL_GAP_THRESHOLD) {
+          text += '\t';
+        } else if (gap > SPACE_GAP_THRESHOLD) {
+          text += ' ';
+        }
+      }
+      text += line[hi].str;
+    }
   }
 
   return sanitizePuaChars(text);
