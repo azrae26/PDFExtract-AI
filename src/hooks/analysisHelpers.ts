@@ -6,6 +6,7 @@
  * 重要設計：
  * - 所有函式皆為純函式（不依賴 React state），接受 isSessionValid callback 作為參數
  * - 可獨立單元測試
+ * - 共用型別：FileRegionsUpdater、FileReportUpdater、FileProgressUpdater、SessionValidator
  */
 
 import { pdfjs } from 'react-pdf';
@@ -25,6 +26,17 @@ export type FileRegionsUpdater = (
 
 /** 檔案級 report 更新器：更新指定檔案的券商名 */
 export type FileReportUpdater = (targetFileId: string, report: string) => void;
+
+/** per-file 分析進度更新器：設定絕對值或增減量 */
+export type FileProgressUpdater = (
+  targetFileId: string,
+  update: {
+    analysisPages?: number;   // 設定分析目標頁數（絕對值）
+    completedPages?: number;  // 設定已完成頁數（絕對值）
+    completedDelta?: number;  // 已完成頁數增減量
+    analysisDelta?: number;   // 分析目標頁數增減量
+  },
+) => void;
 
 /** Session 有效性檢查函式型別 */
 export type SessionValidator = (sessionId: number) => boolean;

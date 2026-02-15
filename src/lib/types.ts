@@ -58,6 +58,10 @@ export interface FileEntry {
   numPages: number;
   /** 各頁分析結果 */
   pageRegions: Map<number, Region[]>;
+  /** 實際要分析的頁數（numPages - effectiveSkip，per-file 追蹤） */
+  analysisPages: number;
+  /** 已完成分析的頁數（per-file 追蹤，不論是否有 regions） */
+  completedPages: number;
   /** 券商名（從 AI 分析結果取得） */
   report?: string;
 }

@@ -113,12 +113,15 @@ export default function FileListPanel({
                     <div className="min-w-0 flex-1">
                       <p className="font-medium leading-tight line-clamp-2 break-all">{entry.name}</p>
                       <p className="text-[10px] text-gray-400 mt-0.5">
-                        {entry.status === 'done' && `${entry.numPages} 頁`}
-                        {entry.status === 'processing' && '分析中...'}
-                        {entry.status === 'queued' && '等待中'}
-                        {entry.status === 'stopped' && '已中斷'}
-                        {entry.status === 'idle' && '還沒跑'}
-                        {entry.status === 'error' && '失敗'}
+                        {entry.numPages > 0
+                          ? `${entry.completedPages}/${entry.analysisPages}/${entry.numPages} 頁`
+                          : entry.status === 'processing' ? '分析中...'
+                          : entry.status === 'queued' ? '等待中'
+                          : entry.status === 'stopped' ? '已中斷'
+                          : entry.status === 'idle' ? '還沒跑'
+                          : entry.status === 'error' ? '失敗'
+                          : ''
+                        }
                       </p>
                     </div>
                     <span

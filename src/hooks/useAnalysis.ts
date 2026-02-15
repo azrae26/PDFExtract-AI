@@ -20,6 +20,7 @@ import { Region } from '@/lib/types';
 import {
   FileRegionsUpdater,
   FileReportUpdater,
+  FileProgressUpdater,
   analyzePageWithRetry,
   mergePageResult,
 } from './analysisHelpers';
@@ -31,6 +32,8 @@ interface UseAnalysisOptions {
   updateFileRegions: FileRegionsUpdater;
   /** 更新指定檔案的券商名（report） */
   updateFileReport: FileReportUpdater;
+  /** 更新指定檔案的 per-file 分析進度 */
+  updateFileProgress: FileProgressUpdater;
   prompt: string;
   tablePrompt: string;
   model: string;
@@ -41,6 +44,7 @@ export default function useAnalysis({
   pdfDocRef,
   updateFileRegions,
   updateFileReport,
+  updateFileProgress,
   prompt,
   tablePrompt,
   model,
@@ -178,6 +182,9 @@ export default function useAnalysis({
       totalPerFile.set(targetFileId, totalPages);
       completedPerFile.set(targetFileId, 0);
 
+      // 設定 per-file 分析進度（寫入 FileEntry）
+      updateFileProgress(targetFileId, { analysisPages: totalPages, completedPages: 0 });
+
       // 清除非 userModified 的 regions，保留手動修改/新增的
       updateFileRegions(targetFileId, (prev) => {
         const kept = new Map<number, Region[]>();
@@ -242,6 +249,9 @@ export default function useAnalysis({
         if (skipped) {
           pageNums.forEach((p) => skipped.delete(p));
         }
+
+        // 更新 per-file 分析進度
+        updateFileProgress(fileId, { analysisDelta: pageNums.length });
 
         const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
         console.log(`[useAnalysis][${ts}] ➕ Dynamically added pages [${pageNums.join(', ')}] to queue for file ${fileId}`);
@@ -311,6 +321,10 @@ export default function useAnalysis({
             pdfDocMap.set(next.fileId, newDoc);
             totalPerFile.set(next.fileId, next.totalPages);
             completedPerFile.set(next.fileId, 0);
+
+            // 設定 per-file 分析進度（寫入 FileEntry）
+            updateFileProgress(next.fileId, { analysisPages: next.totalPages, completedPages: 0 });
+
             // 記錄此檔案分析啟動時的 effectiveSkip
             if (next.effectiveSkip !== undefined) {
               initialSkipRef.current.set(next.fileId, next.effectiveSkip);
@@ -366,6 +380,8 @@ export default function useAnalysis({
           const fileTotal = (totalPerFile.get(fileId) || 1) - 1;
           totalPerFile.set(fileId, fileTotal);
           setAnalysisProgress({ current: globalCompleted, total: globalTotal });
+          // 更新 per-file 分析進度
+          updateFileProgress(fileId, { analysisDelta: -1 });
           // 檢查此檔案是否全部完成（已完成數 >= 減少後的總數）
           const fileDone = completedPerFile.get(fileId) || 0;
           if (fileTotal <= 0 || fileDone >= fileTotal) handleFileDone(fileId);
@@ -397,6 +413,9 @@ export default function useAnalysis({
         const fileDone = (completedPerFile.get(fileId) || 0) + 1;
         completedPerFile.set(fileId, fileDone);
         setAnalysisProgress({ current: globalCompleted, total: globalTotal });
+
+        // 更新 per-file 已完成頁數
+        updateFileProgress(fileId, { completedDelta: 1 });
 
         if (result) {
           await mergePageResult(pageNum, result, pdfDoc, sessionId, isSessionValid, fileId, updateFileRegions, updateFileReport);
@@ -446,7 +465,7 @@ export default function useAnalysis({
         console.log(`[useAnalysis][${endTimestamp}] 🏁 All analysis complete (session=${sessionId}).`);
       }
     },
-    [updateFileRegions, updateFileReport, isSessionValid, addAnalyzingPage, removeAnalyzingPage]
+    [updateFileRegions, updateFileReport, updateFileProgress, isSessionValid, addAnalyzingPage, removeAnalyzingPage]
   );
 
   // === 停止分析 ===
@@ -530,7 +549,8 @@ export default function useAnalysis({
 
       // 如果該頁在佇列中，先取消（讓批次迴圈跳過它）
       const fileQueued = queuedPagesMap.get(targetFileId);
-      if (fileQueued?.has(pageNum)) {
+      const wasInQueue = fileQueued?.has(pageNum) ?? false;
+      if (wasInQueue) {
         const skipped = skippedPagesRef.current.get(targetFileId) || new Set<number>();
         skipped.add(pageNum);
         skippedPagesRef.current.set(targetFileId, skipped);
@@ -545,6 +565,8 @@ export default function useAnalysis({
           }
           return nm;
         });
+        // 抵消 processPage skip 將產生的 analysisDelta -1（此頁仍會被分析）
+        updateFileProgress(targetFileId, { analysisDelta: 1 });
         const ts0 = new Date().toLocaleTimeString('en-US', { hour12: false });
         console.log(`[useAnalysis][${ts0}] ⏭️ Page ${pageNum} pulled from queue for immediate re-analysis.`);
       }
@@ -582,6 +604,11 @@ export default function useAnalysis({
         await mergePageResult(pageNum, result, pdfDoc, sessionId, isSessionValid, targetFileId, updateFileRegions, updateFileReport);
       }
 
+      // 如果此頁原本在佇列中（首次分析，非重跑），更新 per-file 已完成頁數
+      if (wasInQueue) {
+        updateFileProgress(targetFileId, { completedDelta: 1 });
+      }
+
       // 只有當所有飛行中的頁面都完成時才停止分析狀態
       inFlightPageRef.current--;
       if (inFlightPageRef.current === 0) {
@@ -590,7 +617,7 @@ export default function useAnalysis({
         setAnalysisProgress({ current: 0, total: 0 });
       }
     },
-    [prompt, model, pdfDocRef, updateFileRegions, updateFileReport, isSessionValid, queuedPagesMap, addAnalyzingPage, removeAnalyzingPage]
+    [prompt, model, pdfDocRef, updateFileRegions, updateFileReport, updateFileProgress, isSessionValid, queuedPagesMap, addAnalyzingPage, removeAnalyzingPage]
   );
 
   return {

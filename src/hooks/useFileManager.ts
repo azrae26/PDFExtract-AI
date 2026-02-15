@@ -15,6 +15,7 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import { pdfjs } from 'react-pdf';
 import { Region, FileEntry } from '@/lib/types';
+import { FileProgressUpdater } from '@/hooks/analysisHelpers';
 import { parseBrokerFromFilename } from '@/lib/brokerUtils';
 import useAnalysis from '@/hooks/useAnalysis';
 
@@ -189,6 +190,23 @@ export default function useFileManager({
     []
   );
 
+  /** 更新指定檔案的 per-file 分析進度（analysisPages / completedPages） */
+  const updateFileProgress: FileProgressUpdater = useCallback(
+    (targetFileId, update) => {
+      setFiles((prev) =>
+        prev.map((f) => {
+          if (f.id !== targetFileId) return f;
+          let ap = update.analysisPages !== undefined ? update.analysisPages : f.analysisPages;
+          let cp = update.completedPages !== undefined ? update.completedPages : f.completedPages;
+          if (update.analysisDelta) ap += update.analysisDelta;
+          if (update.completedDelta) cp += update.completedDelta;
+          return { ...f, analysisPages: ap, completedPages: cp };
+        })
+      );
+    },
+    []
+  );
+
   /** 更新活躍檔案的 pageRegions（便利函式） */
   const updateActiveFileRegions = useCallback(
     (updater: (prev: Map<number, Region[]>) => Map<number, Region[]>) => {
@@ -233,6 +251,7 @@ export default function useFileManager({
     pdfDocRef,
     updateFileRegions,
     updateFileReport,
+    updateFileProgress,
     prompt,
     tablePrompt,
     model,
@@ -487,6 +506,8 @@ export default function useFileManager({
           status: 'queued' as const,
           numPages: 0,
           pageRegions: new Map(),
+          analysisPages: 0,
+          completedPages: 0,
           report: broker,
         };
       });
