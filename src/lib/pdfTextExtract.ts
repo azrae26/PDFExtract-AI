@@ -55,8 +55,8 @@ const DESCENDER_RATIO = 0.15;
 // === 多欄偵測常數 ===
 /** 投影法桶寬（歸一化單位，X 軸離散化精度） */
 const COLUMN_BUCKET_WIDTH = 2;
-/** 每個欄最少行數——至少兩個欄各有此行數以上才認定為多欄佈局（避免把表格誤判為多欄） */
-const COLUMN_MIN_LINES = 3;
+/** 每個欄最少行數——搭配欄寬比例、斷行合理性、baseline 對齊等多重保護，設為 1 即安全 */
+const COLUMN_MIN_LINES = 1;
 /**
  * Baseline 對齊法：獨有行比例閾值
  * 分成左右兩組後，計算「只在一邊出現的行」佔總行數的比例
@@ -71,6 +71,38 @@ const COLUMN_PROBE_MIN_WIDTH = 6;
 const COLUMN_STRICT_COVERAGE_RATIO = 0.5;
 /** 投影法嚴格最小帶寬（歸一化單位） */
 const COLUMN_STRICT_MIN_WIDTH = 10;
+/** 每個欄的最小寬度佔比——X 跨度 < 整體的此比例 → 不是獨立欄（避免把編號列表縮排誤判為多欄） */
+const COLUMN_MIN_WIDTH_RATIO = 0.10;
+/** 行被分界線穿過時，行內 gap 至少要有此寬度才允許切分（歸一化單位） */
+const COLUMN_CUT_GAP_MIN = 5;
+/** 不合理切割行佔比上限——超過此比例的行在分界線位置沒有足夠 gap → 拒絕該候選 */
+const COLUMN_BAD_CUT_MAX_RATIO = 0.2;
+
+// === PUA 字元替換映射 ===
+// PDF 常用 Wingdings/Symbol 等自訂字型，文字層存為 Private Use Area (U+E000-U+F8FF) 字元
+// 顯示為亂碼，需替換為可正常顯示的標準 Unicode 符號
+const PUA_CHAR_MAP: Record<number, string> = {
+  0xF06E: '■',  // Wingdings: 實心方塊（主項目符號）
+  0xF0D8: '▷',  // Wingdings: 右箭頭（子項目符號）
+  0xF0B7: '●',  // Symbol: 實心圓點
+  0xF06C: '●',  // Wingdings: 圓點變體
+  0xF0A7: '■',  // Wingdings: 方塊變體
+  0xF0A8: '□',  // Wingdings: 空心方塊
+  0xF0B2: '◆',  // Wingdings: 實心菱形
+  0xF076: '✓',  // Wingdings: 打勾
+  0xF0FC: '✓',  // Wingdings: 打勾變體
+  0xF0E8: '➤',  // Wingdings: 箭頭
+};
+
+/** 將 PUA 字元替換為可顯示的標準符號，未登錄的 PUA 字元以 ● 代替 */
+function sanitizePuaChars(text: string): string {
+  // 快速路徑：沒有 PUA 字元就直接回傳
+  if (!/[\uE000-\uF8FF]/.test(text)) return text;
+  return text.replace(/[\uE000-\uF8FF]/g, (ch) => {
+    const code = ch.codePointAt(0)!;
+    return PUA_CHAR_MAP[code] ?? '●';
+  });
+}
 
 /**
  * 自動校正 bbox 邊界
@@ -284,6 +316,56 @@ function testSeparator(
   const rightLineCount = countLines(rightHits);
   if (leftLineCount < COLUMN_MIN_LINES || rightLineCount < COLUMN_MIN_LINES) return null;
 
+  // 欄寬比例檢查：每個欄的 X 跨度至少佔整體的 COLUMN_MIN_WIDTH_RATIO
+  // 避免把編號列表的縮排 gap（"1." "2." vs 正文）誤判為多欄
+  const allMinX = Math.min(...hits.map(h => h.normX));
+  const allMaxX = Math.max(...hits.map(h => h.normRight));
+  const totalSpan = allMaxX - allMinX;
+  if (totalSpan > 0) {
+    const leftSpan = Math.max(...leftHits.map(h => h.normRight)) - Math.min(...leftHits.map(h => h.normX));
+    const rightSpan = Math.max(...rightHits.map(h => h.normRight)) - Math.min(...rightHits.map(h => h.normX));
+    const minRatio = Math.min(leftSpan, rightSpan) / totalSpan;
+    if (minRatio < COLUMN_MIN_WIDTH_RATIO) return null; // 某一邊太窄，不是獨立欄
+  }
+
+  // 斷行合理性檢查：分界線穿過的行，行內在分界位置必須有足夠的 gap
+  // 避免把一行連續文字硬切成兩半
+  const sortedByBl = [...hits].sort((a, b) => a.normBaseline - b.normBaseline);
+  const lineGroups: Hit[][] = [[sortedByBl[0]]];
+  for (let i = 1; i < sortedByBl.length; i++) {
+    const lastGrp = lineGroups[lineGroups.length - 1];
+    if (Math.abs(sortedByBl[i].normBaseline - lastGrp[0].normBaseline) < SAME_LINE_THRESHOLD) {
+      lastGrp.push(sortedByBl[i]);
+    } else {
+      lineGroups.push([sortedByBl[i]]);
+    }
+  }
+
+  let cutLines = 0;    // 分界線穿過的行數
+  let badCutLines = 0;  // 被不合理切割的行數
+
+  for (const line of lineGroups) {
+    const lineMinX = Math.min(...line.map(h => h.normX));
+    const lineMaxX = Math.max(...line.map(h => h.normRight));
+    if (separator <= lineMinX || separator >= lineMaxX) continue; // 不穿過此行
+    cutLines++;
+
+    // 檢查 separator 位置是否有足夠的 gap
+    const sortedLine = [...line].sort((a, b) => a.normX - b.normX);
+    let hasGap = false;
+    for (let j = 1; j < sortedLine.length; j++) {
+      const gapLeft = sortedLine[j - 1].normRight;
+      const gapRight = sortedLine[j].normX;
+      if (gapLeft <= separator && gapRight >= separator && (gapRight - gapLeft) > COLUMN_CUT_GAP_MIN) {
+        hasGap = true;
+        break;
+      }
+    }
+    if (!hasGap) badCutLines++;
+  }
+
+  if (cutLines > 0 && badCutLines / cutLines > COLUMN_BAD_CUT_MAX_RATIO) return null;
+
   // 合併所有 baseline，分行後看每行是 L_、_R、還是 LR
   const allWithSide = [
     ...leftHits.map(h => ({ baseline: h.normBaseline, side: 'L' as const })),
@@ -360,52 +442,59 @@ function splitIntoColumns(hits: Hit[]): Hit[][] {
   const candidates: { separator: number; source: string }[] = [];
 
   // --- 候選來源 1：行內 gap 定位法 ---
-  // 對每行找出最大 X gap（相鄰 hits 之間的間距），收集 gap 中點位置
+  // 對每行找出最大 X gap，用 gap 右邊緣（右邊文字的 normX）聚類
+  // 右邊區塊的左邊緣通常固定，所以用右邊緣聚類比用 gap 中點更穩定
   const LINE_GAP_MIN = 5; // 最小 gap 閾值（歸一化單位）
-  const GAP_CLUSTER_RANGE = 50; // 聚類範圍：gap 位置差距 < 此值歸為同一組
-  const gapPositions: number[] = [];
+  const GAP_CLUSTER_RANGE = 50; // 聚類範圍：gap 右邊緣差距 < 此值歸為同一組
+
+  interface GapInfo { gapLeft: number; gapRight: number } // gapLeft=左邊文字右緣, gapRight=右邊文字左緣
+  const gapInfos: GapInfo[] = [];
 
   for (const line of lines) {
     if (line.length < 2) continue;
     const sortedLine = [...line].sort((a, b) => a.normX - b.normX);
     let maxGap = 0;
-    let maxGapCenter = 0;
+    let maxGapInfo: GapInfo | null = null;
     for (let i = 1; i < sortedLine.length; i++) {
       const gap = sortedLine[i].normX - sortedLine[i - 1].normRight;
       if (gap > maxGap) {
         maxGap = gap;
-        maxGapCenter = (sortedLine[i - 1].normRight + sortedLine[i].normX) / 2;
+        maxGapInfo = { gapLeft: sortedLine[i - 1].normRight, gapRight: sortedLine[i].normX };
       }
     }
-    if (maxGap > LINE_GAP_MIN) {
-      gapPositions.push(maxGapCenter);
+    if (maxGap > LINE_GAP_MIN && maxGapInfo) {
+      gapInfos.push(maxGapInfo);
     }
   }
 
-  // 聚類：排序後找連續的 gap 位置（差距 < GAP_CLUSTER_RANGE 歸為同一組）
-  if (gapPositions.length >= 2) {
-    gapPositions.sort((a, b) => a - b);
-    const clusters: number[][] = [[gapPositions[0]]];
-    for (let i = 1; i < gapPositions.length; i++) {
+  // 用 gapRight 聚類（右邊區塊的左邊緣通常固定，比 gap 中點更穩定）
+  if (gapInfos.length >= 2) {
+    gapInfos.sort((a, b) => a.gapRight - b.gapRight);
+    const clusters: GapInfo[][] = [[gapInfos[0]]];
+    for (let i = 1; i < gapInfos.length; i++) {
       const lastCluster = clusters[clusters.length - 1];
-      if (gapPositions[i] - lastCluster[lastCluster.length - 1] < GAP_CLUSTER_RANGE) {
-        lastCluster.push(gapPositions[i]);
+      if (gapInfos[i].gapRight - lastCluster[lastCluster.length - 1].gapRight < GAP_CLUSTER_RANGE) {
+        lastCluster.push(gapInfos[i]);
       } else {
-        clusters.push([gapPositions[i]]);
+        clusters.push([gapInfos[i]]);
       }
     }
 
-    // 取最大聚類的中位數，且聚類行數 >= 40% 總行數
+    // 取最大聚類，行數 >= 30% 總行數 → 分界線取 gap 中點的中位數
     clusters.sort((a, b) => b.length - a.length);
     const bestCluster = clusters[0];
-    if (bestCluster.length >= Math.ceil(totalLines * 0.4)) {
-      const median = bestCluster[Math.floor(bestCluster.length / 2)];
+    if (bestCluster.length >= Math.ceil(totalLines * 0.3)) {
+      const gapCenters = bestCluster.map(g => (g.gapLeft + g.gapRight) / 2).sort((a, b) => a - b);
+      const median = gapCenters[Math.floor(gapCenters.length / 2)];
       candidates.push({ separator: median, source: '行內gap' });
     }
 
     console.log(
-      `[pdfTextExtract][${_ts()}] 🔎 行內 gap 定位: gapPositions=${gapPositions.length}` +
-      `, clusters=${clusters.map(c => `[n=${c.length}, median=${Math.round(c[Math.floor(c.length / 2)])}]`).join(', ')}` +
+      `[pdfTextExtract][${_ts()}] 🔎 行內 gap 定位: gaps=${gapInfos.length}` +
+      `, clusters=${clusters.map(c => {
+        const rights = c.map(g => g.gapRight);
+        return `[n=${c.length}, R=${Math.round(Math.min(...rights))}-${Math.round(Math.max(...rights))}]`;
+      }).join(', ')}` +
       (candidates.length > 0 ? `, → 候選 sep=${Math.round(candidates[0].separator)}` : `, → 無有效聚類`)
     );
   }
@@ -441,7 +530,8 @@ function splitIntoColumns(hits: Hit[]): Hit[][] {
   }
 
   const probeThreshold = Math.max(1, Math.ceil(totalLines * COLUMN_PROBE_COVERAGE_RATIO));
-  interface LowBand { startX: number; endX: number; minCov: number }
+  // LowBand: minCovCenterX = 覆蓋最低桶群的中心 X（比帶中點更精準，避免分界線落在文字中間）
+  interface LowBand { startX: number; endX: number; minCov: number; minCovCenterX: number }
   const lowBands: LowBand[] = [];
   let bandStart = -1;
   let bandMinCov = Infinity;
@@ -455,7 +545,16 @@ function splitIntoColumns(hits: Hit[]): Hit[][] {
         const startX = globalMinX + bandStart * COLUMN_BUCKET_WIDTH;
         const endX = globalMinX + b * COLUMN_BUCKET_WIDTH;
         if (endX - startX >= COLUMN_PROBE_MIN_WIDTH) {
-          lowBands.push({ startX, endX, minCov: bandMinCov });
+          // 找覆蓋最低桶群的中心位置
+          let minCovSum = 0, minCovCount = 0;
+          for (let mb = bandStart; mb < b; mb++) {
+            if (coverage[mb] === bandMinCov) {
+              minCovSum += globalMinX + (mb + 0.5) * COLUMN_BUCKET_WIDTH;
+              minCovCount++;
+            }
+          }
+          const minCovCenterX = minCovCount > 0 ? minCovSum / minCovCount : (startX + endX) / 2;
+          lowBands.push({ startX, endX, minCov: bandMinCov, minCovCenterX });
         }
         bandStart = -1;
         bandMinCov = Infinity;
@@ -464,7 +563,8 @@ function splitIntoColumns(hits: Hit[]): Hit[][] {
   }
 
   for (const band of lowBands) {
-    const bandSep = (band.startX + band.endX) / 2;
+    // 分界線設在覆蓋最低的位置，而非帶的中點
+    const bandSep = band.minCovCenterX;
     // 避免加入和行內 gap 候選太接近的（重複）
     const isDuplicate = candidates.some(c => Math.abs(c.separator - bandSep) < GAP_CLUSTER_RANGE);
     if (!isDuplicate) {
@@ -512,8 +612,8 @@ function splitIntoColumns(hits: Hit[]): Hit[][] {
     const best = lowBands[0];
     const strictThreshold = Math.max(1, Math.ceil(totalLines * COLUMN_STRICT_COVERAGE_RATIO));
     if (best.minCov < strictThreshold && (best.endX - best.startX) >= COLUMN_STRICT_MIN_WIDTH) {
-      // 用這個 lowBand 的中點重新分
-      const fallbackResult = testSeparator(hits, (best.startX + best.endX) / 2);
+      // 用這個 lowBand 覆蓋最低桶的位置重新分
+      const fallbackResult = testSeparator(hits, best.minCovCenterX);
       if (fallbackResult) {
         console.log(
           `[pdfTextExtract][${_ts()}] 📊 偵測到 2 欄佈局（投影法 strict fallback）：${fallbackResult.detail}`
@@ -534,6 +634,7 @@ function splitIntoColumns(hits: Hit[]): Hit[][] {
  * 把一組 hits 按閱讀順序排序並拼接成文字
  * 排序：先按 baseline（上→下），baseline 相近的按 X（左→右）
  * 同一行內若偵測到明顯水平間距（表格不同欄），自動插入 TAB
+ * 行距突然變大時（段落間距 > 正常行距 × 1.4）自動插入空行
  */
 function formatColumnText(hits: Hit[]): string {
   if (hits.length === 0) return '';
@@ -546,21 +647,59 @@ function formatColumnText(hits: Hit[]): string {
     return baselineDiff;
   });
 
+  // 計算各行 baseline，用於偵測段落間距
+  const lineBaselines: number[] = [];
+  let prevBl = -Infinity;
+  for (const hit of hits) {
+    if (prevBl === -Infinity || Math.abs(hit.normBaseline - prevBl) >= SAME_LINE_THRESHOLD) {
+      lineBaselines.push(hit.normBaseline);
+      prevBl = hit.normBaseline;
+    }
+  }
+
+  // 計算相鄰行距的中位數作為「正常行距」基準
+  const PARA_GAP_RATIO = 1.4; // 行距 > 正常行距 × 此倍數 → 段落分隔
+  let medianLineGap = 0;
+  if (lineBaselines.length >= 3) {
+    const gaps: number[] = [];
+    for (let i = 1; i < lineBaselines.length; i++) {
+      gaps.push(lineBaselines[i] - lineBaselines[i - 1]);
+    }
+    gaps.sort((a, b) => a - b);
+    medianLineGap = gaps[Math.floor(gaps.length / 2)];
+
+    const _ts = () => new Date().toLocaleTimeString('en-US', { hour12: false });
+    console.log(
+      `[pdfTextExtract][${_ts()}] 📏 行距分析: 行數=${lineBaselines.length}, 中位數=${medianLineGap.toFixed(1)}` +
+      `, 閾值=${(medianLineGap * PARA_GAP_RATIO).toFixed(1)}, 各行距=[${gaps.map(g => g.toFixed(1)).join(',')}]`
+    );
+  }
+
   // 拼接文字：同一行的直接拼接，換行用 \n
   // 同一行內，若兩個文字項間距 > 閾值（表格不同欄），插入 TAB
+  // 較小的 gap（項次編號與正文之間）插入空格
+  // 行距超過中位數 × PARA_GAP_RATIO → 插入空行（段落分隔）
   const COL_GAP_THRESHOLD = 30; // 歸一化單位，約頁面寬度 3%
+  const SPACE_GAP_THRESHOLD = 3; // 歸一化單位，項次編號後的小間距插入空格
   let text = '';
   let lastBaseline = -Infinity;
   let lastRight = -Infinity;
   for (const hit of hits) {
     const sameLine = lastBaseline !== -Infinity && Math.abs(hit.normBaseline - lastBaseline) < SAME_LINE_THRESHOLD;
     if (!sameLine && lastBaseline !== -Infinity) {
-      text += '\n';
+      const lineGap = hit.normBaseline - lastBaseline;
+      if (medianLineGap > 0 && lineGap > medianLineGap * PARA_GAP_RATIO) {
+        text += '\n\n'; // 段落分隔
+      } else {
+        text += '\n';
+      }
       lastRight = -Infinity;
     } else if (sameLine && lastRight !== -Infinity) {
       const gap = hit.normX - lastRight;
       if (gap > COL_GAP_THRESHOLD) {
         text += '\t';
+      } else if (gap > SPACE_GAP_THRESHOLD) {
+        text += ' ';
       }
     }
     text += hit.str;
@@ -568,7 +707,7 @@ function formatColumnText(hits: Hit[]): string {
     lastRight = hit.normRight;
   }
 
-  return text;
+  return sanitizePuaChars(text);
 }
 
 /**
