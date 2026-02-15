@@ -28,7 +28,7 @@ import useFileManager from '@/hooks/useFileManager';
 import usePanelResize from '@/hooks/usePanelResize';
 
 // === 預設批次並行數量 ===
-const DEFAULT_BATCH_SIZE = 5;
+const DEFAULT_BATCH_SIZE = 3;
 
 // === localStorage 持久化 key ===
 const STORAGE_KEY = 'pdfextract-ai-config';
@@ -78,7 +78,7 @@ export default function PDFExtractApp() {
   });
   const [skipLastPages, setSkipLastPages] = useState(() => {
     const cfg = loadConfig();
-    return typeof cfg.skipLastPages === 'number' ? cfg.skipLastPages : 4;
+    return typeof cfg.skipLastPages === 'number' ? cfg.skipLastPages : 2;
   });
   // 券商 → 忽略末尾頁數映射（持久化到 localStorage）
   const [brokerSkipMap, setBrokerSkipMap] = useState<Record<string, number>>(() => {

@@ -9,10 +9,10 @@ import { useState, useCallback, useRef, useEffect } from 'react';
 // === 分界線拖動的最小/最大寬度限制 ===
 const MIN_PANEL_WIDTH = 120;
 const MAX_PANEL_WIDTH = Infinity;
-const DEFAULT_FILE_LIST_WIDTH = 180;
-const DEFAULT_LEFT_WIDTH = 420;
-// 右側文字面板預設佔視窗 30%（在初始化時計算）
-const DEFAULT_RIGHT_RATIO = 0.3;
+const DEFAULT_FILE_LIST_WIDTH = 280;
+const DEFAULT_LEFT_WIDTH = 398;
+// 右側文字面板預設 609px
+const DEFAULT_RIGHT_WIDTH = 609;
 
 /** localStorage 讀取配置的輔助函式（與 PDFExtractApp 共用同一個 key） */
 function loadPanelConfig(): Record<string, unknown> {
@@ -45,10 +45,7 @@ export default function usePanelResize(): PanelResizeResult {
   const [rightWidth, setRightWidth] = useState(() => {
     const cfg = loadPanelConfig();
     if (typeof cfg.rightWidth === 'number') return cfg.rightWidth;
-    if (typeof window !== 'undefined') {
-      return Math.max(MIN_PANEL_WIDTH, Math.round(window.innerWidth * DEFAULT_RIGHT_RATIO));
-    }
-    return 400;
+    return DEFAULT_RIGHT_WIDTH;
   });
 
   const isDraggingPanel = useRef<'fileList' | 'left' | 'right' | null>(null);

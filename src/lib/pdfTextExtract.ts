@@ -7,6 +7,8 @@
  *       3. 根據校正後的歸一化座標 (0~1000) 判斷哪些文字落在各個 bbox 內，回傳填入 text 的 Region[]
  *       同一行判定使用 baseline 座標（同一行不同字體大小 baseline 一致，避免 top 座標因字體差異導致誤判同行）
  *       自適應行分組閾值：微聚類找穩定行估算行距，避免固定閾值在行距緊湊 PDF 中合併相鄰行
+ *       （fallback：每行僅 1 個 text item 時用微聚類間距中位數；回彈偵測安全網處理漏網情況）
+ *       行碎片重組：超連結等不同字型導致 baseline 偏移時，偵測 X 跨度不足的碎片行並與互補碎片合併
  *       同一行內若偵測到明顯水平間距（表格不同欄），自動插入 TAB 分隔
  *       4. splitIntoColumns：偵測 bbox 內多欄佈局（行內 gap 定位法 + 投影法 → baseline 對齊法驗證），分欄後逐欄提取避免左右文字混合
  * 依賴：pdfjs-dist (PDFPageProxy)
@@ -679,6 +681,24 @@ function formatColumnText(hits: Hit[]): string {
           ` (原=${SAME_LINE_THRESHOLD})`
         );
       }
+    } else if (microClusters.length >= 3) {
+      // Fallback：每行只有 1 個 text item（count 全為 1）→ 無穩定行
+      // 用微聚類間距的中位數估算行距，避免超連結等離群值影響
+      const spacings: number[] = [];
+      for (let i = 1; i < microClusters.length; i++) {
+        spacings.push(microClusters[i].baseline - microClusters[i - 1].baseline);
+      }
+      spacings.sort((a, b) => a - b);
+      const medianSpacing = spacings[Math.floor(spacings.length / 2)];
+      if (medianSpacing > 3 && medianSpacing < SAME_LINE_THRESHOLD) {
+        lineThreshold = Math.max(3, medianSpacing * 0.7);
+        const _ts = () => new Date().toLocaleTimeString('en-US', { hour12: false });
+        console.log(
+          `[pdfTextExtract][${_ts()}] 🎯 自適應行閾值(fallback): 微聚類=${microClusters.length}` +
+          `, 中位數行距=${medianSpacing.toFixed(1)}, 閾值=${lineThreshold.toFixed(1)}` +
+          ` (原=${SAME_LINE_THRESHOLD})`
+        );
+      }
     }
   }
 
@@ -698,6 +718,64 @@ function formatColumnText(hits: Hit[]): string {
   // 每行內按 X 排序（左→右）
   for (const line of lines) {
     line.sort((a, b) => a.normX - b.normX);
+  }
+
+  // === Step 3.5: 行碎片重組（超連結 baseline 偏移修復） ===
+  // 超連結/不同字型的 text item 可能有偏移的 baseline，導致同一視覺行被拆成碎片
+  // 分散到不同行聚類中（如 "2028 (report) and..." 被拆成 "2028 (" 和 "report) and..."）
+  // 偵測 X 跨度不足的碎片行，與 X 互補的近鄰碎片合併
+  if (lines.length >= 3) {
+    const getLineXInfo = (line: Hit[]) => {
+      const minX = Math.min(...line.map(h => h.normX));
+      const maxX = Math.max(...line.map(h => h.normRight));
+      return { minX, maxX, span: maxX - minX };
+    };
+
+    const lineXInfos = lines.map(getLineXInfo);
+
+    // 參考行寬：取所有行跨度的 75th percentile（排除碎片和短行的影響）
+    const sortedSpans = lineXInfos.map(li => li.span).sort((a, b) => a - b);
+    const refSpan = sortedSpans[Math.floor(sortedSpans.length * 0.75)];
+
+    if (refSpan > 50) {
+      const FRAGMENT_RATIO = 0.7;     // X 跨度 < 參考的 70% → 疑似碎片
+      const MAX_MERGE_DISTANCE = 3;   // 最多跨幾行搜尋配對碎片
+      const BASELINE_MERGE_LIMIT = lineThreshold * 2.5; // 碎片合併的 baseline 容差
+      const COMPLEMENT_RATIO = 1.2;   // 合併後 X 跨度至少比各自最大的大 20%
+
+      for (let i = 0; i < lines.length; i++) {
+        if (lineXInfos[i].span >= refSpan * FRAGMENT_RATIO) continue; // 不是碎片
+
+        for (let j = i + 1; j < Math.min(i + MAX_MERGE_DISTANCE + 1, lines.length); j++) {
+          if (lineXInfos[j].span >= refSpan * FRAGMENT_RATIO) continue; // 不是碎片
+
+          // Baseline 距離檢查
+          const blDiff = Math.abs(lines[i][0].normBaseline - lines[j][0].normBaseline);
+          if (blDiff > BASELINE_MERGE_LIMIT) continue;
+
+          // X 互補性檢查：合併後跨度應明顯大於各自跨度
+          const combinedMinX = Math.min(lineXInfos[i].minX, lineXInfos[j].minX);
+          const combinedMaxX = Math.max(lineXInfos[i].maxX, lineXInfos[j].maxX);
+          const combinedSpan = combinedMaxX - combinedMinX;
+          if (combinedSpan < Math.max(lineXInfos[i].span, lineXInfos[j].span) * COMPLEMENT_RATIO) continue;
+
+          // 合併 j 到 i
+          const _ts = () => new Date().toLocaleTimeString('en-US', { hour12: false });
+          console.log(
+            `[pdfTextExtract][${_ts()}] 🔗 行碎片重組: 合併行[${i}](X=${Math.round(lineXInfos[i].minX)}-${Math.round(lineXInfos[i].maxX)})` +
+            ` + 行[${j}](X=${Math.round(lineXInfos[j].minX)}-${Math.round(lineXInfos[j].maxX)})` +
+            ` → X=${Math.round(combinedMinX)}-${Math.round(combinedMaxX)}`
+          );
+
+          lines[i].push(...lines[j]);
+          lines[i].sort((a, b) => a.normX - b.normX);
+          lines.splice(j, 1);
+          lineXInfos[i] = { minX: combinedMinX, maxX: combinedMaxX, span: combinedSpan };
+          lineXInfos.splice(j, 1);
+          j--; // 繼續搜尋同一 i 的更多配對碎片
+        }
+      }
+    }
   }
 
   // === Step 4: 計算行距中位數（段落間距偵測） ===
@@ -721,8 +799,10 @@ function formatColumnText(hits: Hit[]): string {
   // === Step 5: 逐行拼接文字 ===
   // 行間：行距 > 中位數 × PARA_GAP_RATIO → 空行（段落分隔），否則換行
   // 行內：間距 > COL_GAP_THRESHOLD → TAB，> SPACE_GAP_THRESHOLD → 空格
+  //        gap < WRAPAROUND_THRESHOLD → 回彈偵測（不同行被誤歸同行的安全網）→ 換行
   const COL_GAP_THRESHOLD = 30; // 歸一化單位，約頁面寬度 3%
   const SPACE_GAP_THRESHOLD = 3; // 歸一化單位，項次編號後的小間距插入空格
+  const WRAPAROUND_THRESHOLD = -50; // 回彈偵測：gap 低於此值 → 上個 item 在行尾、當前 item 回到行首
   let text = '';
 
   for (let li = 0; li < lines.length; li++) {
@@ -745,6 +825,11 @@ function formatColumnText(hits: Hit[]): string {
           text += '\t';
         } else if (gap > SPACE_GAP_THRESHOLD) {
           text += ' ';
+        } else if (gap < WRAPAROUND_THRESHOLD) {
+          // 回彈偵測：前一個 item 在行尾（normRight 很大），當前 item 回到行首（normX 很小）
+          // 表示不同視覺行被誤歸為同一行（行距 < lineThreshold 時發生）
+          // 插入換行作為安全網
+          text += '\n';
         }
       }
       text += line[hi].str;
