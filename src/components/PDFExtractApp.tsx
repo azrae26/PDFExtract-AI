@@ -805,6 +805,8 @@ export default function PDFExtractApp() {
 
   // === 切換活躍檔案 ===
   const handleSelectFile = useCallback((fileId: string) => {
+    setScrollTarget(null); // 清除前一個檔案的滾動目標，避免新檔案繼承舊的 scrollIntoView 位置
+    setHoveredRegionId(null); // 清除 hover 狀態，避免切換後殘留高亮
     setActiveFileId(fileId);
     setCurrentPage(1);
   }, []);
@@ -939,6 +941,17 @@ export default function PDFExtractApp() {
     });
     const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
     console.log(`[PDFExtractApp][${ts}] 🗑️ Removed region ${regionId} from page ${page}`);
+  }, [updateActiveFileRegions]);
+
+  // === 刪除某頁的所有 region ===
+  const handleRemoveAllRegions = useCallback((page: number) => {
+    updateActiveFileRegions((prev) => {
+      const updated = new Map(prev);
+      updated.delete(page);
+      return updated;
+    });
+    const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
+    console.log(`[PDFExtractApp][${ts}] 🗑️ Removed all regions from page ${page}`);
   }, [updateActiveFileRegions]);
 
   // === 新增 region（使用者在 PDF 上手動畫框）===
@@ -1189,6 +1202,7 @@ export default function PDFExtractApp() {
                 analyzingPages={fileAnalyzingPages}
                 queuedPages={fileQueuedPages}
                 onCancelQueuedPage={(pageNum: number) => cancelQueuedPage(file.id, pageNum)}
+                onRemoveAllRegions={handleRemoveAllRegions}
                 onRegionDoubleClick={(page: number, regionId: number) => {
                   const region = file.pageRegions.get(page)?.find((r) => r.id === regionId);
                   if (region) {

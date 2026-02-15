@@ -53,13 +53,111 @@ export default function TextPanel({
     overIndex: number;
   } | null>(null);
 
-  // 當 hoveredRegionId 改變時，自動滾動到對應區域
+  // === 自動滾動：兩條獨立事件路徑，各自設定不同滾動參數 ===
+  // 路徑 1：PdfViewer 連動 → useEffect 監聽 hoveredRegionId → 滾到 20~80% 區間
+  // 路徑 2：TextPanel 本身 hover → onMouseEnter 直接呼叫 → 只確保可見即可（8px 緩衝）
+  // 共用底層 lerp 動畫，skipScrollRef 讓 useEffect 跳過 self hover（onMouseEnter 設 true、onMouseLeave 設 false，不在 useEffect 中改動，Strict Mode 安全）
+  const scrollTargetRef = useRef<number | null>(null);
+  const scrollRafRef = useRef<number>(0);
+  const skipScrollRef = useRef(false);
+
+  // 共用：啟動 lerp 滾動動畫到指定 scrollTop
+  const animateScrollTo = useCallback((target: number) => {
+    scrollTargetRef.current = target;
+    // 若動畫已在跑，不重複啟動（loop 會自動讀取最新 target）
+    if (scrollRafRef.current) return;
+
+    const LERP_FACTOR = 0.15;
+    const THRESHOLD = 0.5;
+
+    const animate = () => {
+      const t = scrollTargetRef.current;
+      if (t === null || !scrollContainerRef.current) {
+        scrollRafRef.current = 0;
+        return;
+      }
+      const current = scrollContainerRef.current.scrollTop;
+      const diff = t - current;
+
+      if (Math.abs(diff) < THRESHOLD) {
+        scrollContainerRef.current.scrollTop = t;
+        scrollRafRef.current = 0;
+        scrollTargetRef.current = null;
+        return;
+      }
+
+      scrollContainerRef.current.scrollTop = current + diff * LERP_FACTOR;
+      scrollRafRef.current = requestAnimationFrame(animate);
+    };
+
+    scrollRafRef.current = requestAnimationFrame(animate);
+  }, []);
+
+  // 路徑 1：PdfViewer 連動 → 滾到 15~85% 區間
   useEffect(() => {
-    if (hoveredRegionId && regionRefs.current.has(hoveredRegionId)) {
-      const el = regionRefs.current.get(hoveredRegionId);
-      el?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    if (!hoveredRegionId || skipScrollRef.current) {
+      if (!hoveredRegionId) scrollTargetRef.current = null;
+      return;
     }
-  }, [hoveredRegionId]);
+    const el = regionRefs.current.get(hoveredRegionId);
+    const container = scrollContainerRef.current;
+    if (!el || !container) return;
+
+    const containerRect = container.getBoundingClientRect();
+    const elRect = el.getBoundingClientRect();
+    const containerHeight = containerRect.height;
+    const elTopInContainer = elRect.top - containerRect.top;
+    const elBottomInContainer = elRect.bottom - containerRect.top;
+
+    const zone20 = containerHeight * 0.15;
+    const zone80 = containerHeight * 0.85;
+
+    let scrollDelta = 0;
+    if (elTopInContainer < zone20) {
+      scrollDelta = elTopInContainer - zone20;
+    } else if (elBottomInContainer > zone80) {
+      scrollDelta = elBottomInContainer - zone80;
+    } else {
+      return;
+    }
+
+    animateScrollTo(container.scrollTop + scrollDelta);
+
+    return () => {
+      if (scrollRafRef.current) {
+        cancelAnimationFrame(scrollRafRef.current);
+        scrollRafRef.current = 0;
+      }
+    };
+  }, [hoveredRegionId, animateScrollTo]);
+
+  // 路徑 2：TextPanel 本身 hover → 只確保可見即可
+  // 直接設定 scrollTop（不用 lerp 動畫），因為：
+  // 1. 元素已幾乎可見（能 hover 到），只差一小段距離
+  // 2. 若用 lerp，滾動會改變元素畫面位置 → 觸發 mouseLeave → 動畫被中斷
+  const handleSelfHoverScroll = useCallback((regionKey: string) => {
+    const el = regionRefs.current.get(regionKey);
+    const container = scrollContainerRef.current;
+    if (!el || !container) return;
+
+    const containerRect = container.getBoundingClientRect();
+    const elRect = el.getBoundingClientRect();
+    const containerHeight = containerRect.height;
+    const elTopInContainer = elRect.top - containerRect.top;
+    const elBottomInContainer = elRect.bottom - containerRect.top;
+
+    const SCROLL_PADDING = 8;
+    let scrollDelta = 0;
+    if (elTopInContainer < SCROLL_PADDING) {
+      scrollDelta = elTopInContainer - SCROLL_PADDING;
+    } else if (elBottomInContainer > containerHeight - SCROLL_PADDING) {
+      scrollDelta = elBottomInContainer - (containerHeight - SCROLL_PADDING);
+    } else {
+      return; // 已完全在可視範圍內
+    }
+
+    container.scrollTop += scrollDelta;
+  }, []);
 
   // 複製全部文字到剪貼簿
   const handleCopyAll = useCallback(() => {
@@ -224,8 +322,8 @@ export default function TextPanel({
                           setTimeout(() => setCopiedKey(null), 1200);
                         }
                       }}
-                      onMouseEnter={() => onHover(regionKey)}
-                      onMouseLeave={() => onHover(null)}
+                      onMouseEnter={() => { skipScrollRef.current = true; onHover(regionKey); handleSelfHoverScroll(regionKey); }}
+                      onMouseLeave={() => { skipScrollRef.current = false; onHover(null); }}
                     >
                       {/* X 刪除按鈕 — 右上角 */}
                       <button

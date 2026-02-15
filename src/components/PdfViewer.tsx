@@ -45,6 +45,8 @@ interface PdfViewerProps {
   queuedPages: Set<number>;
   /** 取消佇列中的單頁 */
   onCancelQueuedPage: (page: number) => void;
+  /** 刪除某頁的所有框 */
+  onRemoveAllRegions: (page: number) => void;
 }
 
 export default function PdfViewer({
@@ -64,6 +66,7 @@ export default function PdfViewer({
   analyzingPages,
   queuedPages,
   onCancelQueuedPage,
+  onRemoveAllRegions,
 }: PdfViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [pageWidth, setPageWidth] = useState(600);
@@ -352,41 +355,57 @@ export default function PdfViewer({
                     {pageNum} / {numPages}
                   </div>
 
-                  {/* 重跑按鈕 — 右邊中間（凸出頁面一半） */}
-                  {analyzingPages.has(pageNum) ? (
-                    /* 分析中：旋轉動畫 */
-                    <div
-                      className="absolute top-1/2 -translate-y-1/2 -right-[18px] w-9 h-9 rounded-full bg-blue-500 text-white shadow-lg border border-blue-500 flex items-center justify-center z-20"
-                      title={`第 ${pageNum} 頁分析中...`}
-                    >
-                      <svg className="w-4.5 h-4.5 animate-spin" fill="none" viewBox="0 0 24 24">
-                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" />
-                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                      </svg>
-                    </div>
-                  ) : queuedPages.has(pageNum) ? (
-                    /* 排隊中：顯示 X 可取消 */
-                    <button
-                      onClick={() => onCancelQueuedPage(pageNum)}
-                      className="absolute top-1/2 -translate-y-1/2 -right-[18px] w-9 h-9 rounded-full bg-amber-100 text-amber-600 shadow-md border border-amber-300 flex items-center justify-center hover:bg-red-500 hover:text-white hover:border-red-500 hover:shadow-lg active:scale-90 z-20 transition-all duration-150 cursor-pointer"
-                      title={`第 ${pageNum} 頁排隊中，點擊取消`}
-                    >
-                      <svg className="w-4.5 h-4.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-                      </svg>
-                    </button>
-                  ) : (
-                    /* 正常狀態：可點擊重跑 */
-                    <button
-                      onClick={() => onReanalyzePage(pageNum)}
-                      className="absolute top-1/2 -translate-y-1/2 -right-[18px] w-9 h-9 rounded-full bg-white text-gray-500 shadow-md border border-gray-200 flex items-center justify-center hover:bg-blue-500 hover:text-white hover:border-blue-500 hover:shadow-lg active:scale-90 z-20 transition-all duration-150 cursor-pointer"
-                      title={`重新分析第 ${pageNum} 頁`}
-                    >
-                      <svg className="w-4.5 h-4.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                      </svg>
-                    </button>
-                  )}
+                  {/* 右側按鈕群 — 從上方 25% 處開始，凸出頁面一半 */}
+                  <div className="absolute top-[25%] -right-[18px] flex flex-col gap-2 z-20">
+                    {/* 重跑按鈕 */}
+                    {analyzingPages.has(pageNum) ? (
+                      /* 分析中：旋轉動畫 */
+                      <div
+                        className="w-9 h-9 rounded-full bg-blue-500 text-white shadow-lg border border-blue-500 flex items-center justify-center"
+                        title={`第 ${pageNum} 頁分析中...`}
+                      >
+                        <svg className="w-4.5 h-4.5 animate-spin" fill="none" viewBox="0 0 24 24">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" />
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                        </svg>
+                      </div>
+                    ) : queuedPages.has(pageNum) ? (
+                      /* 排隊中：顯示 X 可取消 */
+                      <button
+                        onClick={() => onCancelQueuedPage(pageNum)}
+                        className="w-9 h-9 rounded-full bg-amber-100 text-amber-600 shadow-md border border-amber-300 flex items-center justify-center hover:bg-red-500 hover:text-white hover:border-red-500 hover:shadow-lg active:scale-90 transition-all duration-150 cursor-pointer"
+                        title={`第 ${pageNum} 頁排隊中，點擊取消`}
+                      >
+                        <svg className="w-4.5 h-4.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                      </button>
+                    ) : (
+                      /* 正常狀態：可點擊重跑 */
+                      <button
+                        onClick={() => onReanalyzePage(pageNum)}
+                        className="w-9 h-9 rounded-full bg-white text-gray-500 shadow-md border border-gray-200 flex items-center justify-center hover:bg-blue-500 hover:text-white hover:border-blue-500 hover:shadow-lg active:scale-90 transition-all duration-150 cursor-pointer"
+                        title={`重新分析第 ${pageNum} 頁`}
+                      >
+                        <svg className="w-4.5 h-4.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                        </svg>
+                      </button>
+                    )}
+
+                    {/* 刪除該頁所有框 */}
+                    {regions.length > 0 && (
+                      <button
+                        onClick={() => onRemoveAllRegions(pageNum)}
+                        className="w-9 h-9 rounded-full bg-white text-gray-400 shadow-md border border-gray-200 flex items-center justify-center hover:bg-red-500 hover:text-white hover:border-red-500 hover:shadow-lg active:scale-90 transition-all duration-150 cursor-pointer"
+                        title={`刪除第 ${pageNum} 頁的所有框 (${regions.length} 個)`}
+                      >
+                        <svg className="w-4.5 h-4.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                      </button>
+                    )}
+                  </div>
 
                   {/* 只渲染可見頁面的 PDF canvas，遠處的頁面用佔位 div 節省記憶體 */}
                   {isVisible ? (
