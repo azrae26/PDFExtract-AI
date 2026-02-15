@@ -1,6 +1,6 @@
 /**
  * 功能：PDF 頁面分析核心邏輯 Custom Hook
- * 職責：跨檔案 worker pool 並行分析、單頁重送（支援多頁累加計數）、佇列頁面取消、per-file analyzingPagesMap、整合雙擊識別
+ * 職責：跨檔案 worker pool 並行分析、單頁重送（支援多頁累加計數）、佇列頁面取消、per-file analyzingPagesMap、整合雙擊識別、券商校正後動態恢復被省略頁面
  * 依賴：react、pdfjs、types、analysisHelpers、useRegionRecognize
  *
  * 重要設計：
@@ -10,6 +10,7 @@
  * - analysisFileIdRef 追蹤目前分析的主要目標檔案 ID
  * - queuedPagesMap（per-file）追蹤排隊中的頁碼，skippedPagesRef（per-file）記錄被使用者取消的頁碼
  * - analyzeAllPages 支援 getNextFile callback，worker 在 task queue 耗盡時自動拉入下一個排隊檔案
+ * - initialSkipRef（per-file）記錄分析啟動時的 effectiveSkip，addPagesToQueueRef 支援券商校正後動態插入頁面
  * - 雙擊區域識別委託給 useRegionRecognize hook，isAnalyzing 合併兩者狀態
  */
 
@@ -54,6 +55,10 @@ export default function useAnalysis({
   const [queuedPagesMap, setQueuedPagesMap] = useState<Map<string, Set<number>>>(new Map());
   // 被使用者取消的頁碼（per-file Map，processPage 會檢查跳過）
   const skippedPagesRef = useRef<Map<string, Set<number>>>(new Map());
+  // 每個檔案分析啟動時實際使用的 effectiveSkip（用於券商校正時正確計算需恢復的頁面差額）
+  const initialSkipRef = useRef<Map<string, number>>(new Map());
+  // 動態插入頁面到 worker pool 的 taskQueue（由 analyzeAllPages closure 內設定，外部透過此 ref 呼叫）
+  const addPagesToQueueRef = useRef<((fileId: string, pageNums: number[]) => void) | null>(null);
 
   // 用來在分析被中斷時標記
   const abortRef = useRef(false);
@@ -119,8 +124,9 @@ export default function useAnalysis({
       concurrency: number,
       targetFileId: string,
       fileUrl: string,
-      getNextFile?: () => Promise<{ fileId: string; url: string; totalPages: number } | null>,
+      getNextFile?: () => Promise<{ fileId: string; url: string; totalPages: number; effectiveSkip?: number } | null>,
       onFileComplete?: (fileId: string, error?: boolean) => void,
+      effectiveSkip?: number,
     ) => {
       // 記錄分析目標檔案 ID（primary file）
       analysisFileIdRef.current = targetFileId;
@@ -134,6 +140,10 @@ export default function useAnalysis({
       abortRef.current = false;
       stoppedByUserRef.current = false;
       skippedPagesRef.current = new Map();
+      // 記錄第一個檔案分析啟動時的 effectiveSkip
+      if (effectiveSkip !== undefined) {
+        initialSkipRef.current.set(targetFileId, effectiveSkip);
+      }
       setBatchIsAnalyzing(true);
       setError(null);
 
@@ -190,6 +200,52 @@ export default function useAnalysis({
         return nm;
       });
       setAnalysisProgress({ current: 0, total: totalPages });
+
+      // === 動態插入頁面到佇列（供券商校正後恢復被省略的頁面）===
+      addPagesToQueueRef.current = (fileId: string, pageNums: number[]) => {
+        if (!isSessionValid(sessionId)) return;
+
+        // 找到 taskQueue 中該 fileId 最後一個 task 的位置，在其後方插入（維持頁碼順序）
+        let insertIdx = -1;
+        for (let i = taskQueue.length - 1; i >= 0; i--) {
+          if (taskQueue[i].fileId === fileId) {
+            insertIdx = i + 1;
+            break;
+          }
+        }
+        const newTasks = pageNums.map((p) => ({ fileId, pageNum: p }));
+        if (insertIdx === -1) {
+          // 該檔案已無 task 在佇列中，插入最前面（優先處理）
+          taskQueue.unshift(...newTasks);
+        } else {
+          taskQueue.splice(insertIdx, 0, ...newTasks);
+        }
+
+        // 更新計數
+        globalTotal += pageNums.length;
+        const ft = totalPerFile.get(fileId) || 0;
+        totalPerFile.set(fileId, ft + pageNums.length);
+        setAnalysisProgress({ current: globalCompleted, total: globalTotal });
+
+        // 更新 queuedPagesMap
+        setQueuedPagesMap((prev) => {
+          const nm = new Map(prev);
+          const s = nm.get(fileId) || new Set<number>();
+          const ns = new Set(s);
+          pageNums.forEach((p) => ns.add(p));
+          nm.set(fileId, ns);
+          return nm;
+        });
+
+        // 從 skippedPagesRef 移除（防止 processPage 跳過）
+        const skipped = skippedPagesRef.current.get(fileId);
+        if (skipped) {
+          pageNums.forEach((p) => skipped.delete(p));
+        }
+
+        const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
+        console.log(`[useAnalysis][${ts}] ➕ Dynamically added pages [${pageNums.join(', ')}] to queue for file ${fileId}`);
+      };
 
       // === 單個檔案完成處理 ===
       const handleFileDone = (fileId: string, hasError?: boolean) => {
@@ -255,6 +311,10 @@ export default function useAnalysis({
             pdfDocMap.set(next.fileId, newDoc);
             totalPerFile.set(next.fileId, next.totalPages);
             completedPerFile.set(next.fileId, 0);
+            // 記錄此檔案分析啟動時的 effectiveSkip
+            if (next.effectiveSkip !== undefined) {
+              initialSkipRef.current.set(next.fileId, next.effectiveSkip);
+            }
 
             // 清除非 userModified 的 regions
             updateFileRegions(next.fileId, (prev) => {
@@ -374,6 +434,9 @@ export default function useAnalysis({
       // 清理剩餘的 pdfDoc（正常情況下 handleFileDone 已清理）
       pdfDocMap.forEach((doc) => { try { doc.destroy(); } catch { /* ignore */ } });
 
+      // 清理動態插入 ref（pool 已結束，無法再插入）
+      addPagesToQueueRef.current = null;
+
       // 只有 session 仍有效時才設定完成狀態（否則可能覆蓋新 session 的狀態）
       // 注意：不在這裡清除 analysisFileIdRef，由 PDFExtractApp 的 completion effect 讀取後清除
       if (isSessionValid(sessionId)) {
@@ -392,10 +455,12 @@ export default function useAnalysis({
     stoppedByUserRef.current = true;
     analysisSessionRef.current++; // 讓飛行中操作全部失效
     analysisFileIdRef.current = null;
+    addPagesToQueueRef.current = null;
     setBatchIsAnalyzing(false);
     setAnalyzingPagesMap(new Map());
     setQueuedPagesMap(new Map());
     skippedPagesRef.current = new Map();
+    initialSkipRef.current = new Map();
     const timestamp = new Date().toLocaleTimeString('en-US', { hour12: false });
     console.log(`[useAnalysis][${timestamp}] 🛑 Analysis stopped by user.`);
   }, []);
@@ -405,11 +470,13 @@ export default function useAnalysis({
     abortRef.current = true;
     analysisSessionRef.current++;
     inFlightPageRef.current = 0;
+    addPagesToQueueRef.current = null;
     setBatchIsAnalyzing(false);
     setAnalysisProgress({ current: 0, total: 0 });
     setAnalyzingPagesMap(new Map());
     setQueuedPagesMap(new Map());
     skippedPagesRef.current = new Map();
+    initialSkipRef.current = new Map();
   }, []);
 
   // === 取消佇列中的單頁（使用者點 X 按鈕）===
@@ -548,5 +615,9 @@ export default function useAnalysis({
     handleRegionDoubleClick,
     /** 取消佇列中的單頁 */
     cancelQueuedPage,
+    /** 每個檔案分析啟動時的 effectiveSkip（用於券商校正計算差額） */
+    initialSkipRef,
+    /** 動態插入頁面到佇列（券商校正後恢復被省略頁面） */
+    addPagesToQueueRef,
   };
 }

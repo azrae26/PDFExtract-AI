@@ -196,27 +196,32 @@ export default function PDFExtractApp() {
     []
   );
 
-  /** 更新指定檔案的券商名（report），並依券商特定忽略末尾頁數取消多餘排隊頁面 */
+  /** 更新指定檔案的券商名（report），並依券商特定忽略末尾頁數調整排隊頁面
+   *  - brokerSkip > initialSkip → 取消多餘排隊頁面
+   *  - brokerSkip < initialSkip → 恢復被省略的頁面（插隊到佇列正確位置）
+   */
   const updateFileReport = useCallback(
     (targetFileId: string, report: string) => {
       setFiles((prev) =>
         prev.map((f) => (f.id === targetFileId ? { ...f, report } : f))
       );
 
-      // 若券商有特定忽略末尾頁數，且比目前分析使用的全域預設值多，取消多餘排隊頁面
+      // 若券商有特定忽略末尾頁數，比較與分析啟動時實際使用的 skip 值
       // 注意：不修改全域 skipLastPages（那是使用者手動設的預設值，僅在無法辨識券商時使用）
       const brokerSkip = brokerSkipMapRef.current[report];
       if (brokerSkip !== undefined) {
         const file = filesRef.current.find((f) => f.id === targetFileId);
         if (file && file.numPages > 0) {
-          const oldPages = Math.max(1, file.numPages - skipLastPagesRef.current);
+          // 使用分析啟動時實際的 effectiveSkip（而非全域預設值），正確處理「檔名誤判券商」的情況
+          const usedSkip = initialSkipRef.current.get(targetFileId) ?? skipLastPagesRef.current;
+          const oldPages = Math.max(1, file.numPages - usedSkip);
           const newPages = Math.max(1, file.numPages - brokerSkip);
           const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
           console.log(
-            `[PDFExtractApp][${ts}] 🏢 Broker "${report}" detected (brokerSkip=${brokerSkip}, globalDefault=${skipLastPagesRef.current})`
+            `[PDFExtractApp][${ts}] 🏢 Broker "${report}" detected (brokerSkip=${brokerSkip}, initialSkip=${usedSkip}, globalDefault=${skipLastPagesRef.current})`
           );
 
-          // 若需分析更少頁面（brokerSkip > 全域預設值），取消多餘排隊頁面
+          // 若需分析更少頁面（brokerSkip > initialSkip），取消多餘排隊頁面
           if (newPages < oldPages) {
             for (let p = newPages + 1; p <= oldPages; p++) {
               cancelQueuedPageRef.current(targetFileId, p);
@@ -224,6 +229,27 @@ export default function PDFExtractApp() {
             console.log(
               `[PDFExtractApp][${ts}] ⏭️ Cancelled queued pages ${newPages + 1}–${oldPages} for file ${targetFileId}`
             );
+          }
+
+          // 若需分析更多頁面（brokerSkip < initialSkip），恢復被省略的頁面到佇列
+          if (newPages > oldPages && !brokerPagesRestoredRef.current.has(targetFileId)) {
+            brokerPagesRestoredRef.current.add(targetFileId);
+            const pagesToAdd: number[] = [];
+            for (let p = oldPages + 1; p <= newPages; p++) {
+              pagesToAdd.push(p);
+            }
+            if (addPagesToQueueRef.current) {
+              addPagesToQueueRef.current(targetFileId, pagesToAdd);
+              console.log(
+                `[PDFExtractApp][${ts}] ➕ Restored pages ${oldPages + 1}–${newPages} to queue for file ${targetFileId}`
+              );
+            } else {
+              console.warn(
+                `[PDFExtractApp][${ts}] ⚠️ Cannot restore pages ${oldPages + 1}–${newPages}: worker pool already finished`
+              );
+            }
+            // 更新 initialSkipRef 為新的 brokerSkip（避免後續重複計算差異）
+            initialSkipRef.current.set(targetFileId, brokerSkip);
           }
         }
       }
@@ -278,6 +304,8 @@ export default function PDFExtractApp() {
   const skipLastPagesRef = useRef(skipLastPages);
   // cancelQueuedPage 來自 useAnalysis（在 updateFileReport 之後才可用），用 ref 橋接
   const cancelQueuedPageRef = useRef<(fid: string, p: number) => void>(() => {});
+  // 防止同一檔案重複恢復被省略頁面（多頁回傳同一券商名時只執行一次）
+  const brokerPagesRestoredRef = useRef<Set<string>>(new Set());
   const [hoveredRegionId, setHoveredRegionId] = useState<string | null>(null);
   const [scrollTarget, setScrollTarget] = useState<string | null>(null);
 
@@ -329,6 +357,8 @@ export default function PDFExtractApp() {
     handleReanalyzePage,
     handleRegionDoubleClick,
     cancelQueuedPage,
+    initialSkipRef,
+    addPagesToQueueRef,
   } = useAnalysis({
     pdfDocRef,
     updateFileRegions,
@@ -343,7 +373,7 @@ export default function PDFExtractApp() {
 
   // === 跨檔案 worker pool 的 getNextFile callback ===
   // 從 files 中找下一個 queued 檔案，標記為 processing，回傳檔案資訊
-  const getNextFileForPool = useCallback(async (): Promise<{ fileId: string; url: string; totalPages: number } | null> => {
+  const getNextFileForPool = useCallback(async (): Promise<{ fileId: string; url: string; totalPages: number; effectiveSkip?: number } | null> => {
     const latestFiles = filesRef.current;
     const nextQueued = latestFiles.find((f) => f.status === 'queued');
     if (!nextQueued) return null;
@@ -393,7 +423,7 @@ export default function PDFExtractApp() {
       ? brokerSkipMapRef.current[nextQueued.report]
       : skipLastPages;
     const pagesToAnalyze = Math.max(1, pages - effectiveSkip);
-    return { fileId: nextQueued.id, url: nextQueued.url, totalPages: pagesToAnalyze };
+    return { fileId: nextQueued.id, url: nextQueued.url, totalPages: pagesToAnalyze, effectiveSkip };
   }, [skipLastPages]);
 
   // === 跨檔案 worker pool 的 onFileComplete callback ===
@@ -629,7 +659,7 @@ export default function PDFExtractApp() {
       const pagesToAnalyze = Math.max(1, pages - effectiveSkip2);
       const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
       console.log(`[PDFExtractApp][${ts}] 🚀 PDF already cached, starting analysis directly for ${nextQueued.id}`);
-      analyzeAllPages(pagesToAnalyze, prompt, model, batchSize, nextQueued.id, nextQueued.url, getNextFileForPool, handlePoolFileComplete);
+      analyzeAllPages(pagesToAnalyze, prompt, model, batchSize, nextQueued.id, nextQueued.url, getNextFileForPool, handlePoolFileComplete, effectiveSkip2);
     }
     // else: PdfViewer 尚未載入，等 handleDocumentLoadForFile 觸發
   }, [skipLastPages, prompt, model, batchSize, analyzeAllPages, getNextFileForPool, handlePoolFileComplete]);
@@ -747,7 +777,7 @@ export default function PDFExtractApp() {
           ? brokerSkipMapRef.current[currentFile.report]
           : skipLastPages;
         const pagesToAnalyze = Math.max(1, pdf.numPages - effectiveSkipDoc);
-        analyzeAllPages(pagesToAnalyze, prompt, model, batchSize, fileId, currentFile.url, getNextFileForPool, handlePoolFileComplete);
+        analyzeAllPages(pagesToAnalyze, prompt, model, batchSize, fileId, currentFile.url, getNextFileForPool, handlePoolFileComplete, effectiveSkipDoc);
       }
     },
     [prompt, model, batchSize, skipLastPages, analyzeAllPages, getNextFileForPool, handlePoolFileComplete]
@@ -834,6 +864,7 @@ export default function PDFExtractApp() {
     }
 
     setFiles((prev) => prev.filter((f) => f.id !== fileId));
+    brokerPagesRestoredRef.current.delete(fileId);
 
     // 如果刪的是目前顯示的檔案，切換到另一個
     if (fileId === activeFileId) {
@@ -875,6 +906,7 @@ export default function PDFExtractApp() {
     setFiles([]);
     setActiveFileId(null);
     pdfDocRef.current = null;
+    brokerPagesRestoredRef.current.clear();
 
     const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
     console.log(`[PDFExtractApp][${ts}] 🗑️ Cleared all files`);
