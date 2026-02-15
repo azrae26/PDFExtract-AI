@@ -1,6 +1,6 @@
 /**
  * 功能：多檔案生命週期管理 Custom Hook
- * 職責：管理 files[] 狀態（唯一資料來源）、PDF 預載快取、分析佇列協調、檔案上傳/刪除/清空、
+ * 職責：管理 files[] 狀態（唯一資料來源）、PDF 預載快取、分析佇列協調、檔案上傳（三模式：背景跑/當前頁並跑/僅加入列表）/刪除/清空、
  *       整合 useAnalysis hook、PDF Document 載入回呼、分析完成收尾、mountedFileIds 衍生計算、
  *       per-file 停止（handleStopFile）、重新分析排隊制（handleReanalyzeFile + priorityFileIdRef）
  * 依賴：react、react-pdf (pdfjs)、useAnalysis hook、brokerUtils
@@ -61,7 +61,8 @@ export interface FileManagerResult {
   updateActiveFileRegions: (updater: (prev: Map<number, Region[]>) => Map<number, Region[]>) => void;
 
   // File operations
-  handleFilesUpload: (newFiles: File[]) => void;
+  /** mode: 'background'=背景跑(預設), 'active'=設為當前頁並跑, 'idle'=僅加入列表不跑 */
+  handleFilesUpload: (newFiles: File[], mode?: 'background' | 'active' | 'idle') => void;
   handleRemoveFile: (fileId: string) => void;
   handleClearAll: () => void;
   handleDocumentLoadForFile: (fileId: string, pdf: pdfjs.PDFDocumentProxy) => void;
@@ -580,14 +581,18 @@ export default function useFileManager({
     }
   }, [processNextInQueue]);
 
-  // === 檔案上傳（支援多檔）===
+  // === 檔案上傳（支援多檔，支援三種模式）===
+  // mode: 'background'=背景跑(預設), 'active'=設為當前頁並跑, 'idle'=僅加入列表不跑
   const handleFilesUpload = useCallback(
-    (newFiles: File[]) => {
+    (newFiles: File[], mode: 'background' | 'active' | 'idle' = 'background') => {
       const timestamp = new Date().toLocaleTimeString('en-US', { hour12: false });
-      console.log(`[useFileManager][${timestamp}] 📁 ${newFiles.length} file(s) uploaded`);
+      const modeLabel = mode === 'background' ? '背景跑' : mode === 'active' ? '當前頁並跑' : '僅加入列表';
+      console.log(`[useFileManager][${timestamp}] 📁 ${newFiles.length} file(s) uploaded (mode: ${modeLabel})`);
 
       const pdfFiles = newFiles.filter((f) => f.type === 'application/pdf');
       if (pdfFiles.length === 0) return;
+
+      const fileStatus = mode === 'idle' ? ('idle' as const) : ('queued' as const);
 
       const knownBrokers = Object.keys(brokerSkipMapRef.current);
       const newEntries: FileEntry[] = pdfFiles.map((file) => {
@@ -601,7 +606,7 @@ export default function useFileManager({
           file,
           url: URL.createObjectURL(file),
           name: file.name,
-          status: 'queued' as const,
+          status: fileStatus,
           numPages: 0,
           pageRegions: new Map(),
           analysisPages: 0,
@@ -611,6 +616,11 @@ export default function useFileManager({
       });
 
       setFiles((prev) => [...prev, ...newEntries]);
+
+      // active 模式：立即切換到第一個新檔案
+      if (mode === 'active' && newEntries.length > 0) {
+        setActiveFileId(newEntries[0].id);
+      }
 
       // 立即為所有新檔案非同步載入頁數（只讀 PDF header，不渲染，輕量）
       // 確保「總頁數」統計從一開始就準確
@@ -637,6 +647,9 @@ export default function useFileManager({
           console.warn(`[useFileManager] ⚠️ Failed to pre-load page count for ${entry.name}:`, e);
         });
       }
+
+      // idle 模式不啟動佇列處理
+      if (mode === 'idle') return;
 
       // 如果目前沒在處理，啟動佇列
       if (!processingQueueRef.current) {

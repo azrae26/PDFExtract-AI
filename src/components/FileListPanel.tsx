@@ -122,7 +122,7 @@ export default function FileListPanel({
           {/* 全域合計統計 */}
           <div className="flex gap-1 text-center">
             <div className="rounded-md bg-green-50 py-1.5 px-2 flex-1">
-              <div className="text-lg font-extrabold text-green-600">
+              <div className="text-lg font-extrabold text-green-600 tracking-widest">
                 {totalCompleted}/{totalAnalysis}
               </div>
               <div className="text-[9px] text-green-600">已完成</div>

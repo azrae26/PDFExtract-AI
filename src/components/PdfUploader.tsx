@@ -150,7 +150,7 @@ export default function PdfUploader({
         <h2 className="text-sm font-semibold text-gray-700">設定</h2>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-4 space-y-2">
+      <div className="flex-1 overflow-y-auto p-4 space-y-2 scrollbar-hide" style={{ scrollbarWidth: 'none' }}>
         {/* 狀態區（最上方）：有檔案時顯示檔名，分析中額外顯示進度統計 */}
         {hasFile && (
           <div className="space-y-2">
@@ -170,7 +170,7 @@ export default function PdfUploader({
             {/* 進度統計：已完成(completedPages/analysisPages) / 總頁數 / 券商名（始終顯示） */}
             <div className="flex gap-1 text-center">
               <div className="rounded-md bg-green-50 py-1.5 px-2" style={{ flex: '1 1 auto' }}>
-                <div className="text-lg font-extrabold text-green-600">
+                <div className="text-lg font-extrabold text-green-600 tracking-widest">
                   {progress.current}/{progress.total}
                 </div>
                 <div className="text-[9px] text-green-600">已完成</div>

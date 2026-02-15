@@ -1,7 +1,7 @@
 /**
  * 功能：PDFExtract AI 主應用元件
  * 職責：管理 UI 配置狀態（prompt / model / 面板寬度等）、Region CRUD、四欄佈局渲染、
- *       hover / scroll 互動、全頁面拖放上傳
+ *       hover / scroll 互動、全頁面三區域拖放上傳（左=背景跑、中=當前頁並跑、右=僅加入列表）
  * 依賴：useFileManager hook（檔案生命週期 + 分析流程）、usePanelResize hook（面板拖動 resize）、
  *       FileListPanel、PdfUploader、PdfViewer、TextPanel
  *
@@ -305,8 +305,9 @@ export default function PDFExtractApp() {
     requestAnimationFrame(() => setScrollTarget(regionKey));
   }, []);
 
-  // === 全頁面拖放 PDF（支援多檔案） ===
+  // === 全頁面拖放 PDF（三區域模式：左=背景跑、中=當前頁並跑、右=僅加入列表）===
   const [isPageDragging, setIsPageDragging] = useState(false);
+  const [dragZone, setDragZone] = useState<'left' | 'center' | 'right' | null>(null);
   const dragCounterRef = useRef(0);
 
   const handlePageDragEnter = useCallback((e: React.DragEvent) => {
@@ -324,29 +325,43 @@ export default function PDFExtractApp() {
     dragCounterRef.current--;
     if (dragCounterRef.current === 0) {
       setIsPageDragging(false);
+      setDragZone(null);
     }
   }, []);
 
   const handlePageDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();
     e.stopPropagation();
+    // 根據滑鼠 X 位置判斷在哪個區域（左 27.5% / 中 45% / 右 27.5%）
+    const ratio = e.clientX / window.innerWidth;
+    if (ratio < 0.275) {
+      setDragZone('left');
+    } else if (ratio < 0.725) {
+      setDragZone('center');
+    } else {
+      setDragZone('right');
+    }
   }, []);
 
   const handlePageDrop = useCallback(
     (e: React.DragEvent) => {
       e.preventDefault();
       e.stopPropagation();
+      const zone = dragZone;
       setIsPageDragging(false);
+      setDragZone(null);
       dragCounterRef.current = 0;
 
       const droppedFiles = Array.from(e.dataTransfer.files).filter(
         (f) => f.type === 'application/pdf'
       );
       if (droppedFiles.length > 0) {
-        handleFilesUpload(droppedFiles);
+        // 左=當前頁並跑, 中=背景跑, 右=僅加入列表
+        const mode = zone === 'left' ? 'active' : zone === 'right' ? 'idle' : 'background';
+        handleFilesUpload(droppedFiles, mode);
       }
     },
-    [handleFilesUpload]
+    [handleFilesUpload, dragZone]
   );
 
   // === 全域分析 toggle handler（FileListPanel 用）===
@@ -407,14 +422,62 @@ export default function PDFExtractApp() {
       onDragOver={handlePageDragOver}
       onDrop={handlePageDrop}
     >
-      {/* 全頁面拖放覆蓋層 */}
+      {/* 全頁面拖放覆蓋層（三區域：左=開啟並分析 27.5%、中=背景分析 45%、右=僅加入列表 27.5%） */}
       {isPageDragging && (
-        <div className="absolute inset-0 z-50 bg-blue-500/10 border-4 border-dashed border-blue-500 flex items-center justify-center pointer-events-none">
-          <div className="bg-white rounded-xl shadow-2xl px-8 py-5 flex items-center gap-3">
-            <svg className="w-8 h-8 text-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
-            </svg>
-            <span className="text-lg font-medium text-blue-700">放開以上傳 PDF（可多檔）</span>
+        <div className="absolute inset-0 z-50 flex pointer-events-none backdrop-blur-md">
+          {/* 左區 — 開啟並分析 (27.5%) */}
+          <div className={`flex flex-col items-center justify-center gap-3 border-4 border-dashed transition-all duration-150 ${
+            dragZone === 'left'
+              ? 'bg-green-500/25 border-green-500'
+              : 'bg-green-500/5 border-green-400/60'
+          }`} style={{ width: '27.5%' }}>
+            <div className={`rounded-full p-4 transition-all duration-150 ${
+              dragZone === 'left' ? 'bg-green-500/20 scale-110' : 'bg-green-500/15'
+            }`}>
+              <svg className={`w-10 h-10 transition-colors duration-150 ${dragZone === 'left' ? 'text-green-600' : 'text-green-500'}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M13 10V3L4 14h7v7l9-11h-7z" />
+              </svg>
+            </div>
+            <div className="text-center">
+              <p className={`text-lg font-bold transition-colors duration-150 ${dragZone === 'left' ? 'text-green-700' : 'text-green-600'}`}>開啟並分析</p>
+              <p className={`text-sm mt-1 transition-colors duration-150 ${dragZone === 'left' ? 'text-green-600' : 'text-green-500'}`}>立即切換至此檔案</p>
+            </div>
+          </div>
+          {/* 中區 — 背景分析 (45%) */}
+          <div className={`flex flex-col items-center justify-center gap-3 border-4 border-dashed transition-all duration-150 ${
+            dragZone === 'center'
+              ? 'bg-blue-500/25 border-blue-500'
+              : 'bg-blue-500/5 border-blue-300/50'
+          }`} style={{ width: '45%' }}>
+            <div className={`rounded-full p-4 transition-all duration-150 ${
+              dragZone === 'center' ? 'bg-blue-500/20 scale-110' : 'bg-blue-500/10'
+            }`}>
+              <svg className={`w-10 h-10 transition-colors duration-150 ${dragZone === 'center' ? 'text-blue-600' : 'text-blue-400'}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M5 12h14M12 5l7 7-7 7" />
+              </svg>
+            </div>
+            <div className="text-center">
+              <p className={`text-lg font-bold transition-colors duration-150 ${dragZone === 'center' ? 'text-blue-700' : 'text-blue-500'}`}>背景分析</p>
+              <p className={`text-sm mt-1 transition-colors duration-150 ${dragZone === 'center' ? 'text-blue-600' : 'text-blue-400'}`}>排入佇列，背景執行</p>
+            </div>
+          </div>
+          {/* 右區 — 僅加入列表 (27.5%) */}
+          <div className={`flex flex-col items-center justify-center gap-3 border-4 border-dashed transition-all duration-150 ${
+            dragZone === 'right'
+              ? 'bg-gray-500/25 border-gray-500'
+              : 'bg-gray-500/5 border-gray-300/50'
+          }`} style={{ width: '27.5%' }}>
+            <div className={`rounded-full p-4 transition-all duration-150 ${
+              dragZone === 'right' ? 'bg-gray-500/20 scale-110' : 'bg-gray-500/10'
+            }`}>
+              <svg className={`w-10 h-10 transition-colors duration-150 ${dragZone === 'right' ? 'text-gray-600' : 'text-gray-400'}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+              </svg>
+            </div>
+            <div className="text-center">
+              <p className={`text-lg font-bold transition-colors duration-150 ${dragZone === 'right' ? 'text-gray-700' : 'text-gray-500'}`}>僅加入列表</p>
+              <p className={`text-sm mt-1 transition-colors duration-150 ${dragZone === 'right' ? 'text-gray-600' : 'text-gray-400'}`}>放進列表，不執行分析</p>
+            </div>
           </div>
         </div>
       )}
