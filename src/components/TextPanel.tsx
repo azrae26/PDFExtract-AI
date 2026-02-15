@@ -7,7 +7,7 @@
 
 'use client';
 
-import { useRef, useEffect, useCallback, useState } from 'react';
+import React, { useRef, useEffect, useCallback, useState } from 'react';
 import { Region } from '@/lib/types';
 import { getBoxColor } from '@/lib/constants';
 
@@ -356,8 +356,13 @@ export default function TextPanel({
                         </div>
                       )}
                       {/* 文字內容 */}
-                      <p className="text-[13px] text-gray-800 leading-relaxed whitespace-pre-wrap break-words">
-                        {region.text}
+                      <p className="text-[13px] text-gray-800 leading-relaxed break-words">
+                        {region.text?.split('\n').map((line, i, arr) => (
+                          <React.Fragment key={i}>
+                            {line}
+                            {i < arr.length - 1 && <br />}
+                          </React.Fragment>
+                        ))}
                       </p>
 
                       {/* 複製成功提示（淡入淡出） */}
