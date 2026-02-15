@@ -76,6 +76,9 @@ export default function PdfViewer({
   // 滾動容器 ref
   const scrollRef = useRef<HTMLDivElement>(null);
 
+  // 每頁右側按鈕群的 ref（用於 scroll 時動態 clamp 位置）
+  const btnGroupRefs = useRef<Map<number, HTMLDivElement>>(new Map());
+
   // 上方/下方還有幾個框的計數
   const [aboveCount, setAboveCount] = useState(0);
   const [belowCount, setBelowCount] = useState(0);
@@ -291,12 +294,26 @@ export default function PdfViewer({
       ticking = true;
       requestAnimationFrame(() => {
         updateAboveBelowCounts();
+        // 動態 clamp 每頁右側按鈕到視口內（距上/下邊緣 100px）
+        const st = scrollEl.scrollTop, vh = scrollEl.clientHeight;
+        btnGroupRefs.current.forEach((btnEl, pn) => {
+          const pe = pageElRefs.current.get(pn);
+          if (!pe) return;
+          const pt = pe.offsetTop, ph = pe.offsetHeight, bh = btnEl.offsetHeight;
+          const def = pt + ph * 0.25;
+          const clamped = Math.max(pt, Math.min(
+            Math.max(st + 100, Math.min(def, st + vh - 100 - bh)),
+            pt + ph - bh
+          ));
+          btnEl.style.top = `${clamped - pt}px`;
+        });
         ticking = false;
       });
     };
     scrollEl.addEventListener('scroll', handler, { passive: true });
     // 初始計算
     updateAboveBelowCounts();
+    handler(); // 按鈕初始位置
     return () => scrollEl.removeEventListener('scroll', handler);
   }, [updateAboveBelowCounts]);
 
@@ -355,8 +372,11 @@ export default function PdfViewer({
                     {pageNum} / {numPages}
                   </div>
 
-                  {/* 右側按鈕群 — 從上方 25% 處開始，凸出頁面一半 */}
-                  <div className="absolute top-[25%] -right-[18px] flex flex-col gap-2 z-20">
+                  {/* 右側按鈕群 — JS 動態 clamp 到視口內（預設 25%） */}
+                  <div
+                    ref={(el) => { if (el) btnGroupRefs.current.set(pageNum, el); else btnGroupRefs.current.delete(pageNum); }}
+                    className="absolute top-[25%] -right-[18px] flex flex-col gap-2 z-20"
+                  >
                     {/* 重跑按鈕 */}
                     {analyzingPages.has(pageNum) ? (
                       /* 分析中：旋轉動畫 */
