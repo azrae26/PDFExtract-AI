@@ -33,11 +33,12 @@ src/
     globals.css               — 全域樣式
     api/analyze/route.ts      — Gemini API 端點（Server Side）
   components/
-    PDFExtractApp.tsx         — 主應用元件（全域狀態管理）
-    PdfUploader.tsx           — 右側面板：拖拉上傳 + Prompt 編輯
+    PDFExtractApp.tsx         — 主應用元件（全域狀態管理、四欄佈局、全域分析 toggle）
+    FileListPanel.tsx         — 最左面板：檔案列表、全域分析控制（暫停/繼續/全部重新分析）
+    PdfUploader.tsx           — 左面板：設定（per-file 狀態顯示）、Prompt 編輯、per-file 停止/重新分析
     PdfViewer.tsx             — 中間面板：PDF 顯示 + bounding boxes
     BoundingBox.tsx           — 可拖動/可 resize 的標註框
-    TextPanel.tsx             — 左側面板：提取文字 + hover 互動
+    TextPanel.tsx             — 右側面板：提取文字 + hover 互動
   lib/
     types.ts                  — TypeScript 型別定義
     constants.ts              — 預設 Prompt、顏色配置等常數

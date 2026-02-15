@@ -1,6 +1,6 @@
 /**
  * 功能：PDF 頁面分析核心邏輯 Custom Hook
- * 職責：跨檔案 worker pool 並行分析、單頁重送（支援多頁累加計數）、佇列頁面取消、per-file analyzingPagesMap、整合雙擊識別、券商校正後動態恢復被省略頁面
+ * 職責：跨檔案 worker pool 並行分析、單頁重送（支援多頁累加計數）、佇列頁面取消、per-file 停止（不影響 pool）、per-file analyzingPagesMap、整合雙擊識別、券商校正後動態恢復被省略頁面
  * 依賴：react、pdfjs、types、analysisHelpers、useRegionRecognize
  *
  * 重要設計：
@@ -498,6 +498,33 @@ export default function useAnalysis({
     initialSkipRef.current = new Map();
   }, []);
 
+  // === 停止單一檔案的分析（不影響 worker pool，其他檔案繼續跑）===
+  // 把該檔案所有剩餘排隊頁碼加入 skippedPagesRef，workers 遇到時自動跳過
+  // 不遞增 analysisSessionRef、不設 abortRef，pool 繼續跑其他檔案
+  const stopSingleFile = useCallback((fileId: string) => {
+    // 取得該檔案所有排隊中的頁碼，全部加入 skippedPagesRef
+    setQueuedPagesMap((prev) => {
+      const queued = prev.get(fileId);
+      if (queued && queued.size > 0) {
+        const skipped = skippedPagesRef.current.get(fileId) || new Set<number>();
+        queued.forEach((p) => skipped.add(p));
+        skippedPagesRef.current.set(fileId, skipped);
+      }
+      const nm = new Map(prev);
+      nm.delete(fileId);
+      return nm;
+    });
+    // 清除該檔案的 analyzingPagesMap（視覺清理，飛行中的請求仍會完成）
+    setAnalyzingPagesMap((prev) => {
+      if (!prev.has(fileId)) return prev;
+      const nm = new Map(prev);
+      nm.delete(fileId);
+      return nm;
+    });
+    const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
+    console.log(`[useAnalysis][${ts}] ⏹️ Stopped single file: ${fileId} (pool continues)`);
+  }, []);
+
   // === 取消佇列中的單頁（使用者點 X 按鈕）===
   const cancelQueuedPage = useCallback((fileId: string, pageNum: number) => {
     const skipped = skippedPagesRef.current.get(fileId) || new Set<number>();
@@ -640,6 +667,8 @@ export default function useAnalysis({
     handleReanalyze,
     handleReanalyzePage,
     handleRegionDoubleClick,
+    /** 停止單一檔案的分析（不影響 pool） */
+    stopSingleFile,
     /** 取消佇列中的單頁 */
     cancelQueuedPage,
     /** 每個檔案分析啟動時的 effectiveSkip（用於券商校正計算差額） */

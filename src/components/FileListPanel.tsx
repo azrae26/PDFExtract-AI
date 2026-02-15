@@ -1,6 +1,7 @@
 /**
- * 功能：最左側檔案列表面板
- * 職責：顯示已匯入的所有 PDF 檔案、狀態圖示、點擊切換目前檢視的檔案、刪除檔案
+ * 功能：最左側檔案列表面板（全域控制中心）
+ * 職責：顯示已匯入的所有 PDF 檔案、狀態圖示、點擊切換目前檢視的檔案、刪除檔案、
+ *       全域分析控制 toggle 按鈕（暫停分析 / 繼續分析 / 全部重新分析）
  * 依賴：types.ts (FileEntry)
  */
 
@@ -14,6 +15,10 @@ interface FileListPanelProps {
   onSelectFile: (fileId: string) => void;
   onRemoveFile: (fileId: string) => void;
   onClearAll: () => void;
+  /** 全域是否正在分析（來自 useAnalysis 的 isAnalyzing） */
+  isAnalyzing: boolean;
+  /** 全域分析 toggle：暫停 / 繼續 / 全部重新分析 */
+  onToggleAnalysis: () => void;
 }
 
 /** 狀態圖示 */
@@ -66,7 +71,30 @@ export default function FileListPanel({
   onSelectFile,
   onRemoveFile,
   onClearAll,
+  isAnalyzing,
+  onToggleAnalysis,
 }: FileListPanelProps) {
+  // 判斷 toggle 按鈕的三態
+  const hasUnfinished = files.some((f) => f.status === 'idle' || f.status === 'stopped');
+  const allDone = files.length > 0 && files.every((f) => f.status === 'done');
+
+  // 全域合計統計
+  const totalCompleted = files.reduce((sum, f) => sum + f.completedPages, 0);
+  const totalAnalysis = files.reduce((sum, f) => sum + f.analysisPages, 0);
+  const totalPages = files.reduce((sum, f) => sum + f.numPages, 0);
+
+  let toggleLabel: string;
+  let toggleColor: string;
+  if (isAnalyzing) {
+    toggleLabel = '暫停分析';
+    toggleColor = 'bg-red-600 text-white hover:bg-red-700 active:bg-red-800';
+  } else if (hasUnfinished) {
+    toggleLabel = '繼續分析';
+    toggleColor = 'border border-blue-500 text-blue-600 bg-white hover:bg-blue-50 active:bg-blue-100';
+  } else {
+    toggleLabel = '全部重新分析';
+    toggleColor = 'border border-blue-500 text-blue-600 bg-white hover:bg-blue-50 active:bg-blue-100';
+  }
   return (
     <div className="h-full flex flex-col bg-gray-50 border-r border-gray-200 overflow-hidden">
       {/* 標題 + 清空按鈕 */}
@@ -87,6 +115,32 @@ export default function FileListPanel({
           </button>
         )}
       </div>
+
+      {/* 全域狀態欄 + 分析控制 toggle 按鈕 */}
+      {files.length > 0 && (
+        <div className="px-3 py-2 border-b border-gray-200 flex-shrink-0 space-y-2">
+          {/* 全域合計統計 */}
+          <div className="flex gap-1 text-center">
+            <div className="rounded-md bg-green-50 py-1.5 px-2 flex-1">
+              <div className="text-lg font-extrabold text-green-600">
+                {totalCompleted}/{totalAnalysis}
+              </div>
+              <div className="text-[9px] text-green-600">已完成</div>
+            </div>
+            <div className="rounded-md bg-blue-50 py-1.5 px-2 flex-1">
+              <div className="text-lg font-extrabold text-blue-600">{totalPages}</div>
+              <div className="text-[9px] text-blue-500">總頁數</div>
+            </div>
+          </div>
+          {/* toggle 按鈕 */}
+          <button
+            onClick={onToggleAnalysis}
+            className={`w-full py-1.5 px-3 text-[13px] font-medium rounded-lg transition-colors cursor-pointer ${toggleColor}`}
+          >
+            {toggleLabel}
+          </button>
+        </div>
+      )}
 
       {/* 檔案列表 */}
       <div className="flex-1 overflow-y-auto">

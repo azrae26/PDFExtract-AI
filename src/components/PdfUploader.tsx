@@ -1,14 +1,17 @@
 /**
- * 功能：左側設定面板
- * 職責：識別文字框 Prompt、識別表格/圖表 Prompt、模型選擇、券商忽略末尾頁數設定、分析進度顯示（已完成/分析頁數/總頁數/券商名）、重新分析按鈕
- * 依賴：react (useState)
+ * 功能：左側設定面板（per-file 狀態顯示）
+ * 職責：識別文字框 Prompt、識別表格/圖表 Prompt、模型選擇、券商忽略末尾頁數設定、
+ *       活躍檔案的進度顯示（已完成/分析頁數/總頁數/券商名）、per-file 停止/重新分析按鈕
+ * 依賴：react (useState)、types.ts (FileEntry)
  *
  * 注意：PDF 上傳功能已移至全頁面拖放（PDFExtractApp），此面板不再處理檔案上傳
+ * 注意：isAnalyzing 語意為活躍檔案是否在跑（activeFile.status === 'processing'），非全域分析狀態
  */
 
 'use client';
 
 import { useState, useRef, useEffect } from 'react';
+import { FileEntry } from '@/lib/types';
 
 /** Gemini 模型選項 */
 export const GEMINI_MODELS = [
@@ -45,6 +48,8 @@ interface PdfUploaderProps {
   brokerSkipMap: Record<string, number>;
   /** 更新券商忽略末尾頁數映射 */
   onBrokerSkipMapChange: (map: Record<string, number>) => void;
+  /** 活躍檔案的狀態（用於按鈕判斷：processing/queued→停止分析，其餘→重新分析） */
+  activeFileStatus?: FileEntry['status'];
 }
 
 export default function PdfUploader({
@@ -69,6 +74,7 @@ export default function PdfUploader({
   report,
   brokerSkipMap,
   onBrokerSkipMapChange,
+  activeFileStatus,
 }: PdfUploaderProps) {
   // 券商 combobox 狀態
   const [brokerInput, setBrokerInput] = useState('');
@@ -161,19 +167,17 @@ export default function PdfUploader({
                 {fileName || ''}
               </span>
             </div>
-            {/* 進度統計：已完成 / 分析頁數 / 總頁數 / 券商名（始終顯示） */}
+            {/* 進度統計：已完成(completedPages/analysisPages) / 總頁數 / 券商名（始終顯示） */}
             <div className="flex gap-1 text-center">
               <div className="rounded-md bg-green-50 py-1.5 px-2" style={{ flex: '1 1 auto' }}>
-                <div className="text-lg font-extrabold text-green-600">{progress.current}</div>
-                <div className="text-[9px] text-green-500">已完成</div>
+                <div className="text-lg font-extrabold text-green-600">
+                  {progress.current}/{progress.total}
+                </div>
+                <div className="text-[9px] text-green-600">已完成</div>
               </div>
               <div className="rounded-md bg-blue-50 py-1.5 px-2" style={{ flex: '1 1 auto' }}>
-                <div className="text-lg font-extrabold text-blue-600">{progress.total}</div>
-                <div className="text-[9px] text-blue-500">分析頁數</div>
-              </div>
-              <div className="rounded-md bg-gray-100 py-1.5 px-2" style={{ flex: '1 1 auto' }}>
-                <div className="text-lg font-extrabold text-gray-700">{numPages}</div>
-                <div className="text-[9px] text-gray-500">總頁數</div>
+                <div className="text-lg font-extrabold text-blue-600">{numPages}</div>
+                <div className="text-[9px] text-blue-500">總頁數</div>
               </div>
               {report && (
                 <div className="rounded-md bg-orange-50 py-1.5 px-2 min-w-0" style={{ flex: '1 1 auto' }}>
@@ -194,19 +198,22 @@ export default function PdfUploader({
           </div>
         )}
 
-        {/* 重新分析 / 停止分析 按鈕 */}
-        {hasFile && (
-          <button
-            onClick={isAnalyzing ? onStop : onReanalyze}
-            className={`w-full py-2 px-4 mb-[16px] text-[14px] leading-5 font-medium rounded-lg transition-colors cursor-pointer ${
-              isAnalyzing
-                ? 'bg-red-600 text-white hover:bg-red-700 active:bg-red-800'
-                : 'bg-blue-600 text-white hover:bg-blue-700 active:bg-blue-800'
-            }`}
-          >
-            {isAnalyzing ? '停止分析' : '重新分析'}
-          </button>
-        )}
+        {/* 停止分析 / 重新分析 按鈕（per-file：processing/queued→停止，其餘→重新分析） */}
+        {hasFile && (() => {
+          const isFileRunning = activeFileStatus === 'processing' || activeFileStatus === 'queued';
+          return (
+            <button
+              onClick={isFileRunning ? onStop : onReanalyze}
+              className={`w-full py-2 px-4 mb-[16px] text-[14px] leading-5 font-medium rounded-lg transition-colors cursor-pointer ${
+                isFileRunning
+                  ? 'bg-red-600 text-white hover:bg-red-700 active:bg-red-800'
+                  : 'border border-blue-500 text-blue-600 bg-white hover:bg-blue-50 active:bg-blue-100'
+              }`}
+            >
+              {isFileRunning ? '停止分析' : '重新分析'}
+            </button>
+          );
+        })()}
 
         {/* 錯誤訊息 */}
         {error && (

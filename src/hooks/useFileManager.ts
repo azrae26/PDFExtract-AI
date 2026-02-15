@@ -1,7 +1,8 @@
 /**
  * 功能：多檔案生命週期管理 Custom Hook
  * 職責：管理 files[] 狀態（唯一資料來源）、PDF 預載快取、分析佇列協調、檔案上傳/刪除/清空、
- *       整合 useAnalysis hook、PDF Document 載入回呼、分析完成收尾、mountedFileIds 衍生計算
+ *       整合 useAnalysis hook、PDF Document 載入回呼、分析完成收尾、mountedFileIds 衍生計算、
+ *       per-file 停止（handleStopFile）、重新分析排隊制（handleReanalyzeFile + priorityFileIdRef）
  * 依賴：react、react-pdf (pdfjs)、useAnalysis hook、brokerUtils
  *
  * 重要設計：
@@ -77,6 +78,12 @@ export interface FileManagerResult {
   queuedPagesMap: Map<string, Set<number>>;
   cancelQueuedPage: (fileId: string, pageNum: number) => void;
   analysisFileIdRef: React.MutableRefObject<string | null>;
+  /** 停止單一檔案的分析（per-file 停止，不影響全域 pool） */
+  handleStopFile: (fileId: string) => void;
+  /** 重新分析指定檔案（pool 跑中→插隊；pool 沒跑→直接啟動） */
+  handleReanalyzeFile: (numPages: number, targetFileId: string, fileUrl: string) => void;
+  /** 觸發佇列處理（將 queued 檔案開始分析） */
+  triggerQueueProcessing: () => void;
 
   // Derived
   mountedFileIds: Set<string>;
@@ -244,6 +251,7 @@ export default function useFileManager({
     handleReanalyze,
     handleReanalyzePage,
     handleRegionDoubleClick,
+    stopSingleFile,
     cancelQueuedPage,
     initialSkipRef,
     addPagesToQueueRef,
@@ -266,9 +274,27 @@ export default function useFileManager({
 
   // === 跨檔案 worker pool 的 getNextFile callback ===
   // 從 files 中找下一個 queued 檔案，標記為 processing，回傳檔案資訊
+  // 優先檢查 priorityFileIdRef（重新分析插隊）
   const getNextFileForPool = useCallback(async (): Promise<{ fileId: string; url: string; totalPages: number; effectiveSkip?: number } | null> => {
     const latestFiles = filesRef.current;
-    const nextQueued = latestFiles.find((f) => f.status === 'queued');
+
+    // 優先拉取 priority 檔案
+    let nextQueued: FileEntry | undefined;
+    const priorityId = priorityFileIdRef.current;
+    if (priorityId) {
+      const priorityFile = latestFiles.find((f) => f.id === priorityId && f.status === 'queued');
+      if (priorityFile) {
+        nextQueued = priorityFile;
+        priorityFileIdRef.current = null; // 消費掉 priority
+        const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
+        console.log(`[useFileManager][${ts}] ⚡ Priority file ${priorityId} pulled from queue`);
+      } else {
+        priorityFileIdRef.current = null; // priority 檔案不在 queued 狀態，清除
+      }
+    }
+    if (!nextQueued) {
+      nextQueued = latestFiles.find((f) => f.status === 'queued');
+    }
     if (!nextQueued) return null;
 
     // 標記為 processing
@@ -321,13 +347,77 @@ export default function useFileManager({
 
   // === 跨檔案 worker pool 的 onFileComplete callback ===
   // 將完成的檔案標記為 done（或 error）
+  // 守衛：若檔案已是 stopped 狀態（per-file 停止），不覆蓋為 done
   const handlePoolFileComplete = useCallback((fileId: string, hasError?: boolean) => {
     setFiles((prev) =>
-      prev.map((f) => (f.id === fileId ? { ...f, status: hasError ? 'error' as const : 'done' as const } : f))
+      prev.map((f) => {
+        if (f.id !== fileId) return f;
+        // 守衛：per-file 停止後不覆蓋
+        if (f.status === 'stopped') return f;
+        return { ...f, status: hasError ? 'error' as const : 'done' as const };
+      })
     );
     const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
     console.log(`[useFileManager][${ts}] ${hasError ? '❌' : '✅'} File ${fileId} marked as ${hasError ? 'error' : 'done'}`);
   }, []);
+
+  // === 優先排隊的檔案 ID（重新分析時插隊）===
+  const priorityFileIdRef = useRef<string | null>(null);
+
+  // === 停止單一檔案的分析（per-file 停止，不影響全域 pool）===
+  const handleStopFile = useCallback((fileId: string) => {
+    const file = filesRef.current.find((f) => f.id === fileId);
+    if (!file) return;
+
+    if (file.status === 'queued') {
+      // queued 狀態直接標記為 stopped
+      setFiles((prev) =>
+        prev.map((f) => (f.id === fileId ? { ...f, status: 'stopped' as const } : f))
+      );
+    } else if (file.status === 'processing') {
+      // processing 狀態：先呼叫 stopSingleFile 跳過剩餘頁面，再標記為 stopped
+      stopSingleFile(fileId);
+      setFiles((prev) =>
+        prev.map((f) => (f.id === fileId ? { ...f, status: 'stopped' as const } : f))
+      );
+    }
+
+    const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
+    console.log(`[useFileManager][${ts}] ⏹️ File ${fileId} stopped by user (per-file)`);
+  }, [stopSingleFile]);
+
+  // === 重新分析活躍檔案（支援排隊制：pool 跑中→插隊；pool 沒跑→直接啟動）===
+  const handleReanalyzeFile = useCallback(
+    (numPagesToAnalyze: number, targetFileId: string, fileUrl: string) => {
+      if (numPagesToAnalyze <= 0 || !fileUrl) return;
+
+      // 清除該檔案的 pageRegions / completedPages / analysisPages
+      updateFileRegions(targetFileId, () => new Map());
+      updateFileProgress(targetFileId, { analysisPages: 0, completedPages: 0 });
+
+      if (isAnalyzing) {
+        // Pool 正在跑 → 如果此檔案正在 processing，先 per-file stop
+        const file = filesRef.current.find((f) => f.id === targetFileId);
+        if (file?.status === 'processing') {
+          stopSingleFile(targetFileId);
+        }
+        // 設為 queued + 設 priorityFileIdRef 讓 getNextFileForPool 優先拉取
+        setFiles((prev) =>
+          prev.map((f) => (f.id === targetFileId ? { ...f, status: 'queued' as const, analysisPages: 0, completedPages: 0 } : f))
+        );
+        priorityFileIdRef.current = targetFileId;
+        const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
+        console.log(`[useFileManager][${ts}] 🔄 File ${targetFileId} queued with priority for re-analysis`);
+      } else {
+        // Pool 沒在跑 → 直接啟動（同原有行為）
+        setFiles((prev) =>
+          prev.map((f) => (f.id === targetFileId ? { ...f, status: 'processing' as const, analysisPages: 0, completedPages: 0 } : f))
+        );
+        analyzeAllPages(numPagesToAnalyze, prompt, model, batchSize, targetFileId, fileUrl, getNextFileForPool, handlePoolFileComplete);
+      }
+    },
+    [isAnalyzing, prompt, model, batchSize, analyzeAllPages, updateFileRegions, updateFileProgress, stopSingleFile, getNextFileForPool, handlePoolFileComplete]
+  );
 
   // === 切換檔案時：清理 pdfDocRef，條件性中斷 session ===
   // 不需要 swap/sync pageRegions，因為 pageRegions 直接從 files 衍生
@@ -482,6 +572,14 @@ export default function useFileManager({
     // else: PdfViewer 尚未載入，等 handleDocumentLoadForFile 觸發
   }, [skipLastPages, prompt, model, batchSize, analyzeAllPages, getNextFileForPool, handlePoolFileComplete]);
 
+  // === 觸發佇列處理（供外部呼叫，如「繼續分析」「全部重新分析」後啟動佇列）===
+  const triggerQueueProcessing = useCallback(() => {
+    if (!processingQueueRef.current) {
+      processingQueueRef.current = true;
+      setTimeout(() => processNextInQueue(), 0);
+    }
+  }, [processNextInQueue]);
+
   // === 檔案上傳（支援多檔）===
   const handleFilesUpload = useCallback(
     (newFiles: File[]) => {
@@ -513,6 +611,32 @@ export default function useFileManager({
       });
 
       setFiles((prev) => [...prev, ...newEntries]);
+
+      // 立即為所有新檔案非同步載入頁數（只讀 PDF header，不渲染，輕量）
+      // 確保「總頁數」統計從一開始就準確
+      for (const entry of newEntries) {
+        if (pdfDocCacheRef.current.has(entry.id)) continue; // 已快取的跳過
+        pdfjs.getDocument(entry.url).promise.then((doc) => {
+          // 確認檔案仍存在
+          if (!filesRef.current.some((f) => f.id === entry.id)) {
+            doc.destroy();
+            return;
+          }
+          // 更新 numPages
+          setFiles((prev) =>
+            prev.map((f) => (f.id === entry.id && f.numPages === 0 ? { ...f, numPages: doc.numPages } : f))
+          );
+          // 存入快取（供後續分析直接使用，避免重複載入）
+          if (!pdfDocCacheRef.current.has(entry.id)) {
+            pdfDocCacheRef.current.set(entry.id, doc);
+            selfLoadedDocIdsRef.current.add(entry.id);
+          } else {
+            doc.destroy();
+          }
+        }).catch((e) => {
+          console.warn(`[useFileManager] ⚠️ Failed to pre-load page count for ${entry.name}:`, e);
+        });
+      }
 
       // 如果目前沒在處理，啟動佇列
       if (!processingQueueRef.current) {
@@ -724,6 +848,7 @@ export default function useFileManager({
     handleStop, handleReanalyze, handleReanalyzePage, handleRegionDoubleClick,
     analyzingPagesMap, queuedPagesMap, cancelQueuedPage,
     analysisFileIdRef,
+    handleStopFile, handleReanalyzeFile, triggerQueueProcessing,
 
     // Derived
     mountedFileIds,

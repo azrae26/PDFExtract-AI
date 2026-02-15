@@ -110,6 +110,7 @@ export default function PDFExtractApp() {
     handleStop, handleReanalyze, handleReanalyzePage, handleRegionDoubleClick,
     analyzingPagesMap, queuedPagesMap, cancelQueuedPage,
     analysisFileIdRef,
+    handleStopFile, handleReanalyzeFile, triggerQueueProcessing,
     mountedFileIds,
   } = useFileManager({
     prompt, tablePrompt, model, batchSize, skipLastPages, brokerSkipMap,
@@ -348,16 +349,40 @@ export default function PDFExtractApp() {
     [handleFilesUpload]
   );
 
-  // 分析中的檔案名（可能不是活躍檔案）
-  const analysisFileName = (() => {
-    if (!isAnalyzing) return activeFile?.name ?? null;
-    const targetId = analysisFileIdRef.current;
-    if (targetId) {
-      const targetFile = files.find((f) => f.id === targetId);
-      return targetFile?.name ?? null;
+  // === 全域分析 toggle handler（FileListPanel 用）===
+  const handleToggleAnalysis = useCallback(() => {
+    if (isAnalyzing) {
+      // 全域暫停
+      handleStop();
+    } else {
+      const hasUnfinished = filesRef.current.some((f) => f.status === 'idle' || f.status === 'stopped');
+      const allDone = filesRef.current.length > 0 && filesRef.current.every((f) => f.status === 'done');
+
+      if (hasUnfinished) {
+        // 繼續分析：將 idle/stopped 設為 queued 並觸發佇列
+        setFiles((prev) =>
+          prev.map((f) =>
+            f.status === 'idle' || f.status === 'stopped'
+              ? { ...f, status: 'queued' as const }
+              : f
+          )
+        );
+        setTimeout(() => triggerQueueProcessing(), 0);
+      } else if (allDone) {
+        // 全部重新分析：清除所有檔案結果，設為 queued
+        setFiles((prev) =>
+          prev.map((f) => ({
+            ...f,
+            status: 'queued' as const,
+            pageRegions: new Map(),
+            analysisPages: 0,
+            completedPages: 0,
+          }))
+        );
+        setTimeout(() => triggerQueueProcessing(), 0);
+      }
     }
-    return activeFile?.name ?? null;
-  })();
+  }, [isAnalyzing, handleStop, setFiles, filesRef, triggerQueueProcessing]);
 
   // 分界線共用的 UI 元素
   const Divider = ({ side }: { side: 'fileList' | 'left' | 'right' }) => (
@@ -402,6 +427,8 @@ export default function PDFExtractApp() {
           onSelectFile={handleSelectFile}
           onRemoveFile={handleRemoveFile}
           onClearAll={handleClearAll}
+          isAnalyzing={isAnalyzing}
+          onToggleAnalysis={handleToggleAnalysis}
         />
       </div>
 
@@ -421,28 +448,27 @@ export default function PDFExtractApp() {
           onBatchSizeChange={setBatchSize}
           skipLastPages={skipLastPages}
           onSkipLastPagesChange={setSkipLastPages}
-          isAnalyzing={isAnalyzing}
-          progress={analysisProgress}
+          isAnalyzing={activeFile?.status === 'processing'}
+          progress={{ current: activeFile?.completedPages ?? 0, total: activeFile?.analysisPages ?? 0 }}
           numPages={numPages}
           onReanalyze={() => {
             if (!activeFileId || !activeFile) return;
-            // 設為 processing 讓檔案列表顯示轉圈
-            setFiles((prev) =>
-              prev.map((f) => (f.id === activeFileId ? { ...f, status: 'processing' as const } : f))
-            );
             // 若檔案已有券商名且在 brokerSkipMap 中有設定，優先使用券商特定值
             const effectiveSkipRe = (activeFile.report && brokerSkipMap[activeFile.report] !== undefined)
               ? brokerSkipMap[activeFile.report]
               : skipLastPages;
-            handleReanalyze(Math.max(1, numPages - effectiveSkipRe), activeFileId, activeFile.url);
+            handleReanalyzeFile(Math.max(1, numPages - effectiveSkipRe), activeFileId, activeFile.url);
           }}
-          onStop={handleStop}
+          onStop={() => {
+            if (activeFileId) handleStopFile(activeFileId);
+          }}
           hasFile={!!activeFile}
           error={error}
-          fileName={analysisFileName}
+          fileName={activeFile?.name ?? null}
           report={activeFile?.report ?? null}
           brokerSkipMap={brokerSkipMap}
           onBrokerSkipMapChange={setBrokerSkipMap}
+          activeFileStatus={activeFile?.status}
         />
       </div>
 
