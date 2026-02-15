@@ -9,7 +9,7 @@
 import { useRef } from 'react';
 import { Rnd } from 'react-rnd';
 import { Region } from '@/lib/types';
-import { getBoxColor, NORMALIZED_MAX } from '@/lib/constants';
+import { getBoxColor, EMPTY_BOX_COLOR, NORMALIZED_MAX } from '@/lib/constants';
 
 interface BoundingBoxProps {
   region: Region;
@@ -76,7 +76,8 @@ export default function BoundingBox({
   onRemove,
   onDoubleClick,
 }: BoundingBoxProps) {
-  const color = getBoxColor(colorIndex);
+  const isEmpty = !region.text?.trim();
+  const color = isEmpty ? EMPTY_BOX_COLOR : getBoxColor(colorIndex);
   const { x, y, width, height } = normalizedToPixel(region.bbox, displayWidth, displayHeight);
 
   // 雙擊右鍵刪除

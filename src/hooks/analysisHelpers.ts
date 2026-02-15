@@ -200,15 +200,12 @@ export async function mergePageResult(
 
   if (!isSessionValid(sessionId)) return;
 
-  // 過濾掉 AI 框內沒有任何文字的 region（框到空白區域，直接丟棄）
-  const beforeCount = regionsWithText.length;
-  regionsWithText = regionsWithText.filter((r) => r.text.trim().length > 0);
-  if (regionsWithText.length < beforeCount) {
-    const removed = beforeCount - regionsWithText.length;
+  // 記錄空文字 region 數量（保留空框，顯示為灰色，不再刪除）
+  const emptyCount = regionsWithText.filter((r) => !r.text.trim()).length;
+  if (emptyCount > 0) {
     const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
-    console.log(`[analysisHelpers][${ts}] 🗑️ Page ${pageNum}: removed ${removed} empty region(s) (${regionsWithText.length} remaining)`);
+    console.log(`[analysisHelpers][${ts}] 🔘 Page ${pageNum}: ${emptyCount} empty region(s) kept as gray (${regionsWithText.length} total)`);
   }
-  if (regionsWithText.length === 0) return;
 
   // Merge：保留 userModified 的 regions，追加 AI 新結果
   const mergeUpdater = (prev: Map<number, Region[]>) => {

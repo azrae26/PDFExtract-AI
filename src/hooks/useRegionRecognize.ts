@@ -47,22 +47,22 @@ export default function useRegionRecognize({
 
       setIsRecognizing(true);
 
+      // 立即標記載入中（在截圖裁切前就顯示「識別中...」，避免 crop 期間用戶看不到回饋）
+      updateFileRegions(targetFileId, (prev) => {
+        const updated = new Map(prev);
+        const rs = updated.get(page);
+        if (rs) {
+          updated.set(page, rs.map((r) =>
+            r.id === regionId ? { ...r, text: '⏳ AI 識別中...', userModified: true } : r
+          ));
+        }
+        return updated;
+      });
+
       try {
         // 截圖裁切
         const { base64, width, height, sizeKB } = await cropRegionToBase64(pdfDoc, page, region);
         console.log(`[useRegionRecognize][${ts}] 📐 Cropped region: ${width}x${height}px, ${sizeKB} KB`);
-
-        // 標記載入中（先在文字欄顯示「識別中...」）
-        updateFileRegions(targetFileId, (prev) => {
-          const updated = new Map(prev);
-          const rs = updated.get(page);
-          if (rs) {
-            updated.set(page, rs.map((r) =>
-              r.id === regionId ? { ...r, text: '⏳ AI 識別中...', userModified: true } : r
-            ));
-          }
-          return updated;
-        });
 
         // 送 API（含重試）
         const result = await recognizeRegionWithRetry(base64, tablePrompt, model, page, regionId);

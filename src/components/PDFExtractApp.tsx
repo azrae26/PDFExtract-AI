@@ -158,6 +158,15 @@ export default function PDFExtractApp() {
   // === 更新單一區域的 bbox（拖動/resize 後）→ 標記 userModified + 自動重新提取文字 ===
   const handleRegionUpdate = useCallback(
     async (page: number, regionId: number, newBbox: [number, number, number, number]) => {
+      // bbox 沒變就跳過（雙擊時 onDragStop 也會觸發，但 bbox 不變，不需要重新提取文字）
+      const currentFile = filesRef.current.find((f) => f.id === activeFileIdRef.current);
+      const currentRegion = currentFile?.pageRegions.get(page)?.find((r) => r.id === regionId);
+      if (currentRegion) {
+        const [cx1, cy1, cx2, cy2] = currentRegion.bbox;
+        const [nx1, ny1, nx2, ny2] = newBbox;
+        if (cx1 === nx1 && cy1 === ny1 && cx2 === nx2 && cy2 === ny2) return;
+      }
+
       const { extractTextForRegions } = await import('@/lib/pdfTextExtract');
 
       updateActiveFileRegions((prev) => {
@@ -183,7 +192,8 @@ export default function PDFExtractApp() {
           const regions = updated.get(page);
           if (regions) {
             const updatedRegions = regions.map((r) =>
-              r.id === regionId ? { ...r, text: extracted.text } : r
+              // 若正在 AI 識別中（text 以 ⏳ 開頭），不覆蓋
+              r.id === regionId && !r.text?.startsWith('⏳') ? { ...r, text: extracted.text } : r
             );
             updated.set(page, updatedRegions);
           }

@@ -9,7 +9,7 @@
 
 import React, { useRef, useEffect, useCallback, useState } from 'react';
 import { Region } from '@/lib/types';
-import { getBoxColor } from '@/lib/constants';
+import { getBoxColor, EMPTY_BOX_COLOR } from '@/lib/constants';
 
 interface TextPanelProps {
   pageRegions: Map<number, Region[]>;
@@ -279,7 +279,8 @@ export default function TextPanel({
                 {/* 該頁的各個區域（支援拖曳排序） */}
                 {regions.map((region, index) => {
                   const regionKey = `${page}-${region.id}`;
-                  const color = getBoxColor(globalIndex);
+                  const isEmpty = !region.text?.trim();
+                  const color = isEmpty ? EMPTY_BOX_COLOR : getBoxColor(globalIndex);
                   const isHovered = hoveredRegionId === regionKey;
                   const isDragging = dragState?.page === page && dragState.dragIndex === index;
                   const isDropTarget = dragState?.page === page && dragState.overIndex === index && dragState.dragIndex !== index;
@@ -356,14 +357,25 @@ export default function TextPanel({
                         </div>
                       )}
                       {/* 文字內容 */}
-                      <p className="text-[13px] text-gray-800 leading-relaxed break-words">
-                        {region.text?.split('\n').map((line, i, arr) => (
-                          <React.Fragment key={i}>
-                            {line}
-                            {i < arr.length - 1 && <br />}
-                          </React.Fragment>
-                        ))}
-                      </p>
+                      {isEmpty ? (
+                        <p className="text-[13px] text-gray-400 leading-relaxed italic">
+                          （無文字）
+                        </p>
+                      ) : region.text?.startsWith('⏳') ? (
+                        <p className="text-[13px] text-blue-600 leading-relaxed flex items-center gap-1.5">
+                          <span className="inline-block animate-hourglass text-[13px]">⏳</span>
+                          {region.text.slice(1).trim()}
+                        </p>
+                      ) : (
+                        <p className="text-[13px] text-gray-800 leading-relaxed break-words">
+                          {region.text?.split('\n').map((line, i, arr) => (
+                            <React.Fragment key={i}>
+                              {line}
+                              {i < arr.length - 1 && <br />}
+                            </React.Fragment>
+                          ))}
+                        </p>
+                      )}
 
                       {/* 複製成功提示（淡入淡出） */}
                       <div

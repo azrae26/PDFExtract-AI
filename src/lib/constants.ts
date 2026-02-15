@@ -59,6 +59,14 @@ export const BOX_COLORS: BoxColor[] = [
   { border: '#F97316', bg: 'rgba(249, 115, 22, 0.12)', hoverBg: 'rgba(249, 115, 22, 0.28)', textBg: 'rgba(249, 115, 22, 0.08)' },
 ];
 
+/** 空文字 region 專用灰色配色 */
+export const EMPTY_BOX_COLOR: BoxColor = {
+  border: '#9CA3AF',
+  bg: 'rgba(156, 163, 175, 0.10)',
+  hoverBg: 'rgba(156, 163, 175, 0.22)',
+  textBg: 'rgba(156, 163, 175, 0.06)',
+};
+
 /** 取得顏色（按 index 循環） */
 export function getBoxColor(index: number): BoxColor {
   return BOX_COLORS[index % BOX_COLORS.length];

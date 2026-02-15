@@ -38,6 +38,18 @@ body {
   background: #9ca3af;
 }
 
+/* 沙漏翻轉動畫：轉 180° → 停頓 → 再轉 180° → 停頓（共 3 秒） */
+@keyframes hourglass-flip {
+  0%   { transform: rotate(0deg); }
+  20%  { transform: rotate(180deg); }
+  50%  { transform: rotate(180deg); }
+  70%  { transform: rotate(360deg); }
+  100% { transform: rotate(360deg); }
+}
+.animate-hourglass {
+  animation: hourglass-flip 3s ease-in-out infinite;
+}
+
 /* react-pdf 的 annotation layer 修正 */
 .react-pdf__Page__annotations {
   display: none;
