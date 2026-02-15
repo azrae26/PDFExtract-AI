@@ -5,6 +5,7 @@
  *       2. resolveOverlappingLines：同一行被多個框覆蓋時，根據行距判斷退縮方向
  *       2.5. enforceMinVerticalGap：擴張後框間上下間距不足時各自退縮，保證最小間距
  *       3. 根據校正後的歸一化座標 (0~1000) 判斷哪些文字落在各個 bbox 內，回傳填入 text 的 Region[]
+ *       同一行判定使用 baseline 座標（同一行不同字體大小 baseline 一致，避免 top 座標因字體差異導致誤判同行）
  *       同一行內若偵測到明顯水平間距（表格不同欄），自動插入 TAB 分隔
  * 依賴：pdfjs-dist (PDFPageProxy)
  */
@@ -25,16 +26,17 @@ interface PdfTextItem {
 interface NormTextItem {
   str: string;
   normX: number;
-  normY: number;
+  normY: number;        // top 座標（視覺上方）
   normW: number;
   normH: number;
+  normBaseline: number; // baseline 座標 = normY + normH（同一行不同字體大小 baseline 一致）
 }
 
-/** 文字行（多個 Y 座標相近的 textItem 組成） */
+/** 文字行（多個 baseline 相近的 textItem 組成） */
 interface TextLine {
-  y: number;         // 行的代表 Y 座標（第一個 item 的 normY）
-  topY: number;      // 行的最小 Y
-  bottomY: number;   // 行的最大底部（normY + normH）
+  baselineY: number; // 行的代表 baseline 座標（第一個 item 的 normBaseline）
+  topY: number;      // 行的最小 normY（視覺上緣）
+  bottomY: number;   // 行的最大 normBaseline（視覺下緣）
 }
 
 // === Bbox 自動校正常數 ===
@@ -106,22 +108,22 @@ function snapBboxToText(
   return [x1, y1, x2, y2];
 }
 
-/** 把 textItems 按 Y 座標分行 */
+/** 把 textItems 按 baseline 座標分行（同一行不同字體大小 baseline 一致，比 top 更準確） */
 function groupIntoLines(textItems: NormTextItem[]): TextLine[] {
-  const sorted = [...textItems].sort((a, b) => a.normY - b.normY);
+  const sorted = [...textItems].sort((a, b) => a.normBaseline - b.normBaseline);
   const lines: TextLine[] = [];
 
   for (const ti of sorted) {
     const last = lines[lines.length - 1];
-    if (last && Math.abs(ti.normY - last.y) < SAME_LINE_THRESHOLD) {
+    if (last && Math.abs(ti.normBaseline - last.baselineY) < SAME_LINE_THRESHOLD) {
       // 同一行：更新範圍
       last.topY = Math.min(last.topY, ti.normY);
-      last.bottomY = Math.max(last.bottomY, ti.normY + ti.normH);
+      last.bottomY = Math.max(last.bottomY, ti.normBaseline);
     } else {
       lines.push({
-        y: ti.normY,
+        baselineY: ti.normBaseline,
         topY: ti.normY,
-        bottomY: ti.normY + ti.normH,
+        bottomY: ti.normBaseline,
       });
     }
   }
@@ -223,33 +225,33 @@ function extractTextFromBbox(
 ): string {
   const [x1, y1, x2, y2] = bbox;
 
-  // 收集與 bbox 有交集的文字項（含右邊緣座標，用於計算欄間距）
-  const hits: { str: string; normX: number; normY: number; normRight: number }[] = [];
+  // 收集與 bbox 有交集的文字項（含右邊緣座標與 baseline，用於排序和欄間距計算）
+  const hits: { str: string; normX: number; normBaseline: number; normRight: number }[] = [];
 
   for (const ti of textItems) {
     const tiRight = ti.normX + ti.normW;
-    const tiBottom = ti.normY + ti.normH;
-    if (ti.normX < x2 && tiRight > x1 && ti.normY < y2 && tiBottom > y1) {
-      hits.push({ str: ti.str, normX: ti.normX, normY: ti.normY, normRight: tiRight });
+    if (ti.normX < x2 && tiRight > x1 && ti.normY < y2 && ti.normBaseline > y1) {
+      hits.push({ str: ti.str, normX: ti.normX, normBaseline: ti.normBaseline, normRight: tiRight });
     }
   }
 
-  // 按閱讀順序排序：先按 Y（上→下），Y 相近的按 X（左→右）
+  // 按閱讀順序排序：先按 baseline（上→下），baseline 相近的按 X（左→右）
+  // 使用 baseline 而非 top 座標，因為同一行不同字體大小的文字 baseline 一致
   hits.sort((a, b) => {
-    const yDiff = a.normY - b.normY;
-    if (Math.abs(yDiff) < SAME_LINE_THRESHOLD) return a.normX - b.normX;
-    return yDiff;
+    const baselineDiff = a.normBaseline - b.normBaseline;
+    if (Math.abs(baselineDiff) < SAME_LINE_THRESHOLD) return a.normX - b.normX;
+    return baselineDiff;
   });
 
   // 拼接文字：同一行的直接拼接，換行用 \n
   // 同一行內，若兩個文字項間距 > 閾值（表格不同欄），插入 TAB
   const COL_GAP_THRESHOLD = 30; // 歸一化單位，約頁面寬度 3%
   let text = '';
-  let lastY = -Infinity;
+  let lastBaseline = -Infinity;
   let lastRight = -Infinity;
   for (const hit of hits) {
-    const sameLine = lastY !== -Infinity && Math.abs(hit.normY - lastY) < SAME_LINE_THRESHOLD;
-    if (!sameLine && lastY !== -Infinity) {
+    const sameLine = lastBaseline !== -Infinity && Math.abs(hit.normBaseline - lastBaseline) < SAME_LINE_THRESHOLD;
+    if (!sameLine && lastBaseline !== -Infinity) {
       text += '\n';
       lastRight = -Infinity;
     } else if (sameLine && lastRight !== -Infinity) {
@@ -259,7 +261,7 @@ function extractTextFromBbox(
       }
     }
     text += hit.str;
-    lastY = hit.normY;
+    lastBaseline = hit.normBaseline;
     lastRight = hit.normRight;
   }
 
@@ -304,7 +306,7 @@ export async function extractTextForRegions(
     const normW = (w / vw) * NORMALIZED_MAX;
     const normH = (h / vh) * NORMALIZED_MAX;
 
-    textItems.push({ str: ti.str, normX, normY, normW, normH });
+    textItems.push({ str: ti.str, normX, normY, normW, normH, normBaseline: normY + normH });
   }
 
   // === Phase 1: Snap — 水平校正 + Y 軸半行補足 ===
