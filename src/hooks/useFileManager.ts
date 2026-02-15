@@ -1,0 +1,710 @@
+/**
+ * 功能：多檔案生命週期管理 Custom Hook
+ * 職責：管理 files[] 狀態（唯一資料來源）、PDF 預載快取、分析佇列協調、檔案上傳/刪除/清空、
+ *       整合 useAnalysis hook、PDF Document 載入回呼、分析完成收尾、mountedFileIds 衍生計算
+ * 依賴：react、react-pdf (pdfjs)、useAnalysis hook、brokerUtils
+ *
+ * 重要設計：
+ * - files 陣列是唯一資料來源（Single Source of Truth），每個 FileEntry 擁有自己的 pageRegions
+ * - 所有寫入統一走 updateFileRegions / updateActiveFileRegions → setFiles
+ * - 多 PdfViewer 預掛載由 mountedFileIds 控制（以活躍檔案為中心的滑動視窗）
+ * - PDF 預載快取：目前 + 後 4 份共 5 份，快取上限 7 份，超過才驅逐
+ * - 跨檔案 worker pool：getNextFileForPool / handlePoolFileComplete 串接 useAnalysis
+ */
+
+import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
+import { pdfjs } from 'react-pdf';
+import { Region, FileEntry } from '@/lib/types';
+import { parseBrokerFromFilename } from '@/lib/brokerUtils';
+import useAnalysis from '@/hooks/useAnalysis';
+
+// === PDF 預載 / 快取常數 ===
+const PDF_PRELOAD_WINDOW = 5; // 預載視窗大小（目前 + 後 4 份）
+const PDF_CACHE_MAX = 7;      // 快取超過此數量才開始驅逐
+
+/** 空 Map 常數（避免每次 render 建立新物件導致不必要的 re-render） */
+const EMPTY_MAP = new Map<number, Region[]>();
+
+/** 產生唯一 ID */
+let _fileIdCounter = 0;
+function generateFileId(): string {
+  return `file-${Date.now()}-${++_fileIdCounter}`;
+}
+
+// === Hook 輸入介面 ===
+interface UseFileManagerOptions {
+  prompt: string;
+  tablePrompt: string;
+  model: string;
+  batchSize: number;
+  skipLastPages: number;
+  brokerSkipMap: Record<string, number>;
+}
+
+// === Hook 輸出介面 ===
+export interface FileManagerResult {
+  // Core state
+  files: FileEntry[];
+  setFiles: React.Dispatch<React.SetStateAction<FileEntry[]>>;
+  activeFileId: string | null;
+  setActiveFileId: React.Dispatch<React.SetStateAction<string | null>>;
+  activeFile: FileEntry | null;
+  numPages: number;
+  pageRegions: Map<number, Region[]>;
+
+  // Refs（供 region CRUD 使用）
+  filesRef: React.MutableRefObject<FileEntry[]>;
+  activeFileIdRef: React.MutableRefObject<string | null>;
+  pdfDocRef: React.MutableRefObject<pdfjs.PDFDocumentProxy | null>;
+  updateActiveFileRegions: (updater: (prev: Map<number, Region[]>) => Map<number, Region[]>) => void;
+
+  // File operations
+  handleFilesUpload: (newFiles: File[]) => void;
+  handleRemoveFile: (fileId: string) => void;
+  handleClearAll: () => void;
+  handleDocumentLoadForFile: (fileId: string, pdf: pdfjs.PDFDocumentProxy) => void;
+
+  // Analysis（轉發自 useAnalysis）
+  isAnalyzing: boolean;
+  analysisProgress: { current: number; total: number };
+  error: string | null;
+  handleStop: () => void;
+  handleReanalyze: (numPages: number, targetFileId: string, fileUrl: string) => void;
+  handleReanalyzePage: (pageNum: number, fileId: string) => void;
+  handleRegionDoubleClick: (page: number, region: Region, fileId: string) => void;
+  analyzingPagesMap: Map<string, Set<number>>;
+  queuedPagesMap: Map<string, Set<number>>;
+  cancelQueuedPage: (fileId: string, pageNum: number) => void;
+  analysisFileIdRef: React.MutableRefObject<string | null>;
+
+  // Derived
+  mountedFileIds: Set<string>;
+}
+
+export default function useFileManager({
+  prompt,
+  tablePrompt,
+  model,
+  batchSize,
+  skipLastPages,
+  brokerSkipMap,
+}: UseFileManagerOptions): FileManagerResult {
+  // === 多檔案狀態 ===
+  const [files, setFiles] = useState<FileEntry[]>([]);
+  const [activeFileId, setActiveFileId] = useState<string | null>(null);
+  // 用 ref 追蹤最新的 files / activeFileId，避免 callback 內 closure stale
+  const filesRef = useRef<FileEntry[]>([]);
+  filesRef.current = files;
+  const activeFileIdRef = useRef<string | null>(null);
+  activeFileIdRef.current = activeFileId;
+  // 標記是否正在自動處理佇列（避免重複觸發）
+  const processingQueueRef = useRef(false);
+
+  // === 目前活躍檔案的衍生狀態 ===
+  const activeFile = files.find((f) => f.id === activeFileId) ?? null;
+  const numPages = activeFile?.numPages ?? 0;
+
+  // === pageRegions 從 activeFile 衍生（唯讀，Single Source of Truth） ===
+  const pageRegions = useMemo(
+    () => activeFile?.pageRegions ?? EMPTY_MAP,
+    [activeFile?.pageRegions]
+  );
+
+  /** 更新指定檔案的 pageRegions（統一寫入 files 陣列） */
+  const updateFileRegions = useCallback(
+    (targetFileId: string, updater: (prev: Map<number, Region[]>) => Map<number, Region[]>) => {
+      setFiles((prev) =>
+        prev.map((f) => (f.id === targetFileId ? { ...f, pageRegions: updater(f.pageRegions) } : f))
+      );
+    },
+    []
+  );
+
+  // === 券商相關 refs ===
+  const brokerSkipMapRef = useRef(brokerSkipMap);
+  const skipLastPagesRef = useRef(skipLastPages);
+  // cancelQueuedPage 來自 useAnalysis（在 updateFileReport 之後才可用），用 ref 橋接
+  const cancelQueuedPageRef = useRef<(fid: string, p: number) => void>(() => {});
+  // 防止同一檔案重複恢復被省略頁面（多頁回傳同一券商名時只執行一次）
+  const brokerPagesRestoredRef = useRef<Set<string>>(new Set());
+
+  /** 更新指定檔案的券商名（report），並依券商特定忽略末尾頁數調整排隊頁面
+   *  - brokerSkip > initialSkip → 取消多餘排隊頁面
+   *  - brokerSkip < initialSkip → 恢復被省略的頁面（插隊到佇列正確位置）
+   */
+  const updateFileReport = useCallback(
+    (targetFileId: string, report: string) => {
+      setFiles((prev) =>
+        prev.map((f) => (f.id === targetFileId ? { ...f, report } : f))
+      );
+
+      // 若券商有特定忽略末尾頁數，比較與分析啟動時實際使用的 skip 值
+      // 注意：不修改全域 skipLastPages（那是使用者手動設的預設值，僅在無法辨識券商時使用）
+      const brokerSkip = brokerSkipMapRef.current[report];
+      if (brokerSkip !== undefined) {
+        const file = filesRef.current.find((f) => f.id === targetFileId);
+        if (file && file.numPages > 0) {
+          // 使用分析啟動時實際的 effectiveSkip（而非全域預設值），正確處理「檔名誤判券商」的情況
+          const usedSkip = initialSkipRef.current.get(targetFileId) ?? skipLastPagesRef.current;
+          const oldPages = Math.max(1, file.numPages - usedSkip);
+          const newPages = Math.max(1, file.numPages - brokerSkip);
+          const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
+          console.log(
+            `[useFileManager][${ts}] 🏢 Broker "${report}" detected (brokerSkip=${brokerSkip}, initialSkip=${usedSkip}, globalDefault=${skipLastPagesRef.current})`
+          );
+
+          // 若需分析更少頁面（brokerSkip > initialSkip），取消多餘排隊頁面
+          if (newPages < oldPages) {
+            for (let p = newPages + 1; p <= oldPages; p++) {
+              cancelQueuedPageRef.current(targetFileId, p);
+            }
+            console.log(
+              `[useFileManager][${ts}] ⏭️ Cancelled queued pages ${newPages + 1}–${oldPages} for file ${targetFileId}`
+            );
+          }
+
+          // 若需分析更多頁面（brokerSkip < initialSkip），恢復被省略的頁面到佇列
+          if (newPages > oldPages && !brokerPagesRestoredRef.current.has(targetFileId)) {
+            brokerPagesRestoredRef.current.add(targetFileId);
+            const pagesToAdd: number[] = [];
+            for (let p = oldPages + 1; p <= newPages; p++) {
+              pagesToAdd.push(p);
+            }
+            if (addPagesToQueueRef.current) {
+              addPagesToQueueRef.current(targetFileId, pagesToAdd);
+              console.log(
+                `[useFileManager][${ts}] ➕ Restored pages ${oldPages + 1}–${newPages} to queue for file ${targetFileId}`
+              );
+            } else {
+              console.warn(
+                `[useFileManager][${ts}] ⚠️ Cannot restore pages ${oldPages + 1}–${newPages}: worker pool already finished`
+              );
+            }
+            // 更新 initialSkipRef 為新的 brokerSkip（避免後續重複計算差異）
+            initialSkipRef.current.set(targetFileId, brokerSkip);
+          }
+        }
+      }
+    },
+    []
+  );
+
+  /** 更新活躍檔案的 pageRegions（便利函式） */
+  const updateActiveFileRegions = useCallback(
+    (updater: (prev: Map<number, Region[]>) => Map<number, Region[]>) => {
+      const id = activeFileIdRef.current;
+      if (!id) return;
+      setFiles((prev) =>
+        prev.map((f) => (f.id === id ? { ...f, pageRegions: updater(f.pageRegions) } : f))
+      );
+    },
+    []
+  );
+
+  // === PDF Document refs ===
+  const pdfDocRef = useRef<pdfjs.PDFDocumentProxy | null>(null);
+
+  // === PDF Document 預載快取（預載：目前 + 後4份；釋放：超過7份才驅逐，從上方檔案先釋放）===
+  const pdfDocCacheRef = useRef<Map<string, pdfjs.PDFDocumentProxy>>(new Map());
+  /** 追蹤由我們自行透過 pdfjs.getDocument() 載入的 doc fileId（可安全 destroy）。
+   *  react-pdf 的 <Document> 內部建立的 doc 不在此 set 中，不可由我們 destroy。 */
+  const selfLoadedDocIdsRef = useRef<Set<string>>(new Set());
+
+  // === useAnalysis Hook ===
+  const {
+    isAnalyzing,
+    analysisProgress,
+    error,
+    abortRef,
+    analysisFileIdRef,
+    stoppedByUserRef,
+    analyzingPagesMap,
+    queuedPagesMap,
+    analyzeAllPages,
+    handleStop,
+    invalidateSession,
+    handleReanalyze,
+    handleReanalyzePage,
+    handleRegionDoubleClick,
+    cancelQueuedPage,
+    initialSkipRef,
+    addPagesToQueueRef,
+  } = useAnalysis({
+    pdfDocRef,
+    updateFileRegions,
+    updateFileReport,
+    prompt,
+    tablePrompt,
+    model,
+    batchSize,
+  });
+  // 橋接 cancelQueuedPage 到 ref（供 updateFileReport 回呼使用）
+  cancelQueuedPageRef.current = cancelQueuedPage;
+
+  // === 同步 refs（供 updateFileReport 回呼穩定存取最新值）===
+  useEffect(() => { skipLastPagesRef.current = skipLastPages; }, [skipLastPages]);
+  useEffect(() => { brokerSkipMapRef.current = brokerSkipMap; }, [brokerSkipMap]);
+
+  // === 跨檔案 worker pool 的 getNextFile callback ===
+  // 從 files 中找下一個 queued 檔案，標記為 processing，回傳檔案資訊
+  const getNextFileForPool = useCallback(async (): Promise<{ fileId: string; url: string; totalPages: number; effectiveSkip?: number } | null> => {
+    const latestFiles = filesRef.current;
+    const nextQueued = latestFiles.find((f) => f.status === 'queued');
+    if (!nextQueued) return null;
+
+    // 標記為 processing
+    setFiles((prev) =>
+      prev.map((f) => (f.id === nextQueued.id ? { ...f, status: 'processing' as const } : f))
+    );
+
+    // 取得頁數
+    let pages = nextQueued.numPages;
+    // 優先從預載快取取得 numPages
+    if (pages === 0) {
+      const cachedDoc = pdfDocCacheRef.current.get(nextQueued.id);
+      if (cachedDoc) {
+        pages = cachedDoc.numPages;
+        setFiles((prev) =>
+          prev.map((f) => (f.id === nextQueued.id ? { ...f, numPages: pages } : f))
+        );
+      }
+    }
+    // 快取也沒有，則載入取得頁數
+    if (pages === 0) {
+      try {
+        const tempDoc = await pdfjs.getDocument(nextQueued.url).promise;
+        pages = tempDoc.numPages;
+        // 存入快取（避免重複載入）
+        pdfDocCacheRef.current.set(nextQueued.id, tempDoc);
+        selfLoadedDocIdsRef.current.add(nextQueued.id); // 標記為自行載入（可安全 destroy）
+        setFiles((prev) =>
+          prev.map((f) => (f.id === nextQueued.id ? { ...f, numPages: pages } : f))
+        );
+        const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
+        console.log(`[useFileManager][${ts}] 📄 Loaded page count for queued file: ${pages} pages`);
+      } catch (e) {
+        const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
+        console.error(`[useFileManager][${ts}] ❌ Failed to load queued PDF:`, e);
+        setFiles((prev) =>
+          prev.map((f) => (f.id === nextQueued.id ? { ...f, status: 'error' as const } : f))
+        );
+        return null;
+      }
+    }
+
+    // 若檔案已有券商名且在 brokerSkipMap 中有設定，優先使用券商特定值
+    const effectiveSkip = (nextQueued.report && brokerSkipMapRef.current[nextQueued.report] !== undefined)
+      ? brokerSkipMapRef.current[nextQueued.report]
+      : skipLastPages;
+    const pagesToAnalyze = Math.max(1, pages - effectiveSkip);
+    return { fileId: nextQueued.id, url: nextQueued.url, totalPages: pagesToAnalyze, effectiveSkip };
+  }, [skipLastPages]);
+
+  // === 跨檔案 worker pool 的 onFileComplete callback ===
+  // 將完成的檔案標記為 done（或 error）
+  const handlePoolFileComplete = useCallback((fileId: string, hasError?: boolean) => {
+    setFiles((prev) =>
+      prev.map((f) => (f.id === fileId ? { ...f, status: hasError ? 'error' as const : 'done' as const } : f))
+    );
+    const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
+    console.log(`[useFileManager][${ts}] ${hasError ? '❌' : '✅'} File ${fileId} marked as ${hasError ? 'error' : 'done'}`);
+  }, []);
+
+  // === 切換檔案時：清理 pdfDocRef，條件性中斷 session ===
+  // 不需要 swap/sync pageRegions，因為 pageRegions 直接從 files 衍生
+  const prevActiveFileIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (activeFileId === prevActiveFileIdRef.current) return;
+
+    // 只要有任何檔案正在分析，就不中斷 session（分析結果透過 updateFileRegions 直接寫入 files 陣列）
+    const anyProcessing = filesRef.current.some((f) => f.status === 'processing');
+    if (anyProcessing) {
+      const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
+      console.log(`[useFileManager][${ts}] 🔄 Switching files while analysis is running, keeping session alive`);
+    } else {
+      invalidateSession();
+    }
+
+    // 從快取立即設定 pdfDocRef（若有），讓分析操作可立即使用
+    if (activeFileId && pdfDocCacheRef.current.has(activeFileId)) {
+      pdfDocRef.current = pdfDocCacheRef.current.get(activeFileId)!;
+    } else {
+      pdfDocRef.current = null;
+    }
+
+    prevActiveFileIdRef.current = activeFileId;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeFileId]);
+
+  // === PDF 滑動視窗預載：目前檔案 + 後 4 份 ===
+  useEffect(() => {
+    const cache = pdfDocCacheRef.current;
+    const currentFiles = filesRef.current;
+    const currentIdx = currentFiles.findIndex((f) => f.id === activeFileId);
+    if (currentIdx === -1) return;
+
+    // 計算視窗內的 fileIds（目前 + 後 PDF_PRELOAD_WINDOW-1 份）
+    const windowFileIds = new Set<string>();
+    for (let i = currentIdx; i < Math.min(currentIdx + PDF_PRELOAD_WINDOW, currentFiles.length); i++) {
+      windowFileIds.add(currentFiles[i].id);
+    }
+
+    // 預載視窗內尚未快取的檔案
+    windowFileIds.forEach((fid) => {
+      if (cache.has(fid)) return;
+      const fileEntry = currentFiles.find((f) => f.id === fid);
+      if (!fileEntry) return;
+
+      // 非同步預載（不阻塞 UI）
+      pdfjs.getDocument(fileEntry.url).promise.then((doc) => {
+        // 檢查此檔案是否還在 files 中（可能已被刪除）
+        const stillExists = filesRef.current.some((f) => f.id === fid);
+        if (!stillExists) {
+          doc.destroy();
+          return;
+        }
+        cache.set(fid, doc);
+        selfLoadedDocIdsRef.current.add(fid); // 標記為自行載入（可安全 destroy）
+
+        // 順便更新 numPages（若為 0）
+        const entry = filesRef.current.find((f) => f.id === fid);
+        if (entry && entry.numPages === 0) {
+          setFiles((prev) =>
+            prev.map((f) => (f.id === fid ? { ...f, numPages: doc.numPages } : f))
+          );
+        }
+
+        const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
+        console.log(`[useFileManager][${ts}] 📦 Pre-loaded PDF: ${fileEntry.name} (${doc.numPages} pages)`);
+      }).catch((e) => {
+        console.warn(`[useFileManager] ⚠️ Failed to pre-load PDF ${fid}:`, e);
+      });
+    });
+
+    // 驅逐：超過 PDF_CACHE_MAX 才釋放，從目前檔案上方（index 更小的）先驅逐
+    if (cache.size > PDF_CACHE_MAX) {
+      // 收集所有快取中的 fileId，依在 files 陣列中的 index 排序
+      const cachedIds = Array.from(cache.keys());
+      const fileIdToIdx = new Map(currentFiles.map((f, i) => [f.id, i]));
+
+      // 排出驅逐優先順序：目前檔案上方的 → index 由小到大（最遠的先驅逐）
+      const aboveIds = cachedIds
+        .filter((fid) => (fileIdToIdx.get(fid) ?? -1) < currentIdx)
+        .sort((a, b) => (fileIdToIdx.get(a) ?? 0) - (fileIdToIdx.get(b) ?? 0));
+      // 下方超出視窗的（距離目前越遠越先驅逐）
+      const belowIds = cachedIds
+        .filter((fid) => (fileIdToIdx.get(fid) ?? -1) > currentIdx + PDF_PRELOAD_WINDOW - 1)
+        .sort((a, b) => (fileIdToIdx.get(b) ?? 0) - (fileIdToIdx.get(a) ?? 0));
+      // 已不在 files 中的孤兒條目（最優先驅逐）
+      const orphanIds = cachedIds.filter((fid) => !fileIdToIdx.has(fid));
+
+      const evictOrder = [...orphanIds, ...aboveIds, ...belowIds];
+      let toEvict = cache.size - PDF_CACHE_MAX;
+      for (const fid of evictOrder) {
+        if (toEvict <= 0) break;
+        const doc = cache.get(fid);
+        if (doc) {
+          // 只 destroy 由我們自行載入的 doc；react-pdf 內部建立的 doc 由 react-pdf 自行管理生命週期
+          if (selfLoadedDocIdsRef.current.has(fid)) {
+            doc.destroy();
+            selfLoadedDocIdsRef.current.delete(fid);
+          }
+          cache.delete(fid);
+          toEvict--;
+        }
+      }
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeFileId, files.length]);
+
+  // 清理所有檔案的 object URL
+  useEffect(() => {
+    return () => {
+      filesRef.current.forEach((f) => URL.revokeObjectURL(f.url));
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // === 處理佇列中的下一個檔案 ===
+  // 不自動切換 activeFileId（使用者留在目前檢視的檔案），僅在無活躍檔案時才設定
+  // 若 pdfDocCacheRef 已有該檔案的 doc（PdfViewer 預掛載已載入），直接呼叫 analyzeAllPages
+  // 否則等 handleDocumentLoadForFile 觸發（防止雙重啟動由 analysisFileIdRef 守衛）
+  const processNextInQueue = useCallback(() => {
+    const latestFiles = filesRef.current;
+    const nextQueued = latestFiles.find((f) => f.status === 'queued');
+    if (!nextQueued) {
+      processingQueueRef.current = false;
+      return;
+    }
+
+    // 只在沒有活躍檔案時才自動切換（首次上傳 / 全部清空後），否則分析在背景進行
+    if (!activeFileIdRef.current) {
+      setActiveFileId(nextQueued.id);
+    }
+    setFiles((prev) =>
+      prev.map((f) =>
+        f.id === nextQueued.id ? { ...f, status: 'processing' as const } : f
+      )
+    );
+
+    // 如果 PDF 已在預載快取中，直接啟動分析（不等 handleDocumentLoadForFile）
+    const cachedDoc = pdfDocCacheRef.current.get(nextQueued.id);
+    if (cachedDoc) {
+      const pages = nextQueued.numPages || cachedDoc.numPages;
+      // 若檔案已有券商名且在 brokerSkipMap 中有設定，優先使用券商特定值
+      const effectiveSkip2 = (nextQueued.report && brokerSkipMapRef.current[nextQueued.report] !== undefined)
+        ? brokerSkipMapRef.current[nextQueued.report]
+        : skipLastPages;
+      const pagesToAnalyze = Math.max(1, pages - effectiveSkip2);
+      const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
+      console.log(`[useFileManager][${ts}] 🚀 PDF already cached, starting analysis directly for ${nextQueued.id}`);
+      analyzeAllPages(pagesToAnalyze, prompt, model, batchSize, nextQueued.id, nextQueued.url, getNextFileForPool, handlePoolFileComplete, effectiveSkip2);
+    }
+    // else: PdfViewer 尚未載入，等 handleDocumentLoadForFile 觸發
+  }, [skipLastPages, prompt, model, batchSize, analyzeAllPages, getNextFileForPool, handlePoolFileComplete]);
+
+  // === 檔案上傳（支援多檔）===
+  const handleFilesUpload = useCallback(
+    (newFiles: File[]) => {
+      const timestamp = new Date().toLocaleTimeString('en-US', { hour12: false });
+      console.log(`[useFileManager][${timestamp}] 📁 ${newFiles.length} file(s) uploaded`);
+
+      const pdfFiles = newFiles.filter((f) => f.type === 'application/pdf');
+      if (pdfFiles.length === 0) return;
+
+      const knownBrokers = Object.keys(brokerSkipMapRef.current);
+      const newEntries: FileEntry[] = pdfFiles.map((file) => {
+        const broker = parseBrokerFromFilename(file.name, knownBrokers);
+        if (broker) {
+          const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
+          console.log(`[useFileManager][${ts}] 🏢 Broker "${broker}" detected from filename: ${file.name}`);
+        }
+        return {
+          id: generateFileId(),
+          file,
+          url: URL.createObjectURL(file),
+          name: file.name,
+          status: 'queued' as const,
+          numPages: 0,
+          pageRegions: new Map(),
+          report: broker,
+        };
+      });
+
+      setFiles((prev) => [...prev, ...newEntries]);
+
+      // 如果目前沒在處理，啟動佇列
+      if (!processingQueueRef.current) {
+        processingQueueRef.current = true;
+        setTimeout(() => processNextInQueue(), 0);
+      }
+    },
+    [processNextInQueue]
+  );
+
+  // === PDF Document 載入完成（per-file scoped，由 react-pdf 觸發）===
+  const handleDocumentLoadForFile = useCallback(
+    (fileId: string, pdf: pdfjs.PDFDocumentProxy) => {
+      const timestamp = new Date().toLocaleTimeString('en-US', { hour12: false });
+      console.log(`[useFileManager][${timestamp}] 📄 PDF loaded (${fileId}): ${pdf.numPages} pages`);
+
+      // 存入預載快取（若尚未快取）
+      if (!pdfDocCacheRef.current.has(fileId)) {
+        pdfDocCacheRef.current.set(fileId, pdf);
+      }
+
+      // 僅活躍檔案才設定 pdfDocRef（供 useAnalysis 使用）
+      if (fileId === activeFileIdRef.current) {
+        pdfDocRef.current = pdf;
+      }
+
+      // 更新檔案的 numPages
+      setFiles((prev) =>
+        prev.map((f) => (f.id === fileId ? { ...f, numPages: pdf.numPages } : f))
+      );
+
+      // 如果此檔案是 processing 狀態且尚未在分析中，自動開始分析
+      // 重要：若 analysisFileIdRef.current 已等於此檔案 ID，表示分析正在進行，不要重啟
+      const currentFile = filesRef.current.find((f) => f.id === fileId);
+      if (currentFile?.status === 'processing' && analysisFileIdRef.current !== fileId) {
+        // 若檔案已有券商名且在 brokerSkipMap 中有設定，優先使用券商特定值
+        const effectiveSkipDoc = (currentFile.report && brokerSkipMapRef.current[currentFile.report] !== undefined)
+          ? brokerSkipMapRef.current[currentFile.report]
+          : skipLastPages;
+        const pagesToAnalyze = Math.max(1, pdf.numPages - effectiveSkipDoc);
+        analyzeAllPages(pagesToAnalyze, prompt, model, batchSize, fileId, currentFile.url, getNextFileForPool, handlePoolFileComplete, effectiveSkipDoc);
+      }
+    },
+    [prompt, model, batchSize, skipLastPages, analyzeAllPages, getNextFileForPool, handlePoolFileComplete]
+  );
+
+  // === 分析完成後，標記殘餘 processing 檔案 + 處理 stopped 狀態 ===
+  // 注意：跨檔案 pool 中，各檔案完成時已由 handlePoolFileComplete 即時標記為 done
+  // 此 effect 僅處理 pool 整體結束後的收尾工作
+  useEffect(() => {
+    if (isAnalyzing) return;
+
+    // 判斷是否由使用者主動停止
+    const wasStopped = stoppedByUserRef.current;
+    stoppedByUserRef.current = false;
+
+    // 找到剛完成分析的主要檔案（可能不是目前活躍的檔案）
+    const targetFileId = analysisFileIdRef.current;
+    // 讀取完後立即清除 ref（避免重複觸發）
+    analysisFileIdRef.current = null;
+
+    // 決定目標狀態：使用者中斷 → stopped，正常完成 → done
+    const finishedStatus = wasStopped ? ('stopped' as const) : ('done' as const);
+
+    // 安全網：標記所有仍在 processing 的檔案（正常情況下 handlePoolFileComplete 已處理）
+    const processingFiles = filesRef.current.filter((f) => f.status === 'processing');
+    if (processingFiles.length > 0 || (targetFileId && filesRef.current.find((f) => f.id === targetFileId)?.status === 'processing')) {
+      setFiles((prev) =>
+        prev.map((f) => (f.status === 'processing' ? { ...f, status: finishedStatus } : f))
+      );
+    }
+
+    // 使用者主動停止 → 將所有 queued 檔案標記為 idle，停止佇列處理
+    if (wasStopped) {
+      setFiles((prev) =>
+        prev.map((f) => (f.status === 'queued' ? { ...f, status: 'idle' as const } : f))
+      );
+      processingQueueRef.current = false;
+      const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
+      console.log(`[useFileManager][${ts}] 🛑 Queue stopped by user, queued files marked as idle`);
+      return;
+    }
+
+    // Pool 結束，檢查是否有在 pool 運行期間新增的 queued 檔案
+    if (targetFileId || processingFiles.length > 0) {
+      const remainingQueued = filesRef.current.some((f) => f.status === 'queued');
+      if (remainingQueued) {
+        // 有新上傳的 queued 檔案，啟動新的 pool
+        setTimeout(() => processNextInQueue(), 100);
+      } else {
+        processingQueueRef.current = false;
+      }
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAnalyzing]);
+
+  // === 刪除檔案 ===
+  const handleRemoveFile = useCallback((fileId: string) => {
+    const file = filesRef.current.find((f) => f.id === fileId);
+    if (!file) return;
+
+    // 如果正在處理這個檔案，先中斷分析
+    if (file.status === 'processing') {
+      invalidateSession();
+    }
+
+    // 釋放 URL + 清理預載快取
+    URL.revokeObjectURL(file.url);
+    const cachedDoc = pdfDocCacheRef.current.get(fileId);
+    if (cachedDoc) {
+      // 只 destroy 由我們自行載入的 doc；react-pdf 的 doc 由其元件 unmount 時自行清理
+      if (selfLoadedDocIdsRef.current.has(fileId)) {
+        cachedDoc.destroy();
+        selfLoadedDocIdsRef.current.delete(fileId);
+      }
+      pdfDocCacheRef.current.delete(fileId);
+    }
+
+    setFiles((prev) => prev.filter((f) => f.id !== fileId));
+    brokerPagesRestoredRef.current.delete(fileId);
+
+    // 如果刪的是目前顯示的檔案，切換到另一個
+    if (fileId === activeFileIdRef.current) {
+      const remaining = filesRef.current.filter((f) => f.id !== fileId);
+      if (remaining.length > 0) {
+        // 優先切到下一個，否則切到最後一個
+        const idx = filesRef.current.findIndex((f) => f.id === fileId);
+        const nextFile = remaining[Math.min(idx, remaining.length - 1)];
+        setActiveFileId(nextFile.id);
+      } else {
+        setActiveFileId(null);
+        pdfDocRef.current = null;
+      }
+    }
+
+    const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
+    console.log(`[useFileManager][${ts}] 🗑️ Removed file: ${file.name}`);
+  }, [invalidateSession]);
+
+  // === 清空所有檔案 ===
+  const handleClearAll = useCallback(() => {
+    // 中斷進行中的分析
+    invalidateSession();
+
+    // 釋放所有 URL + 清理預載快取
+    for (const file of filesRef.current) {
+      URL.revokeObjectURL(file.url);
+    }
+    // 只 destroy 由我們自行載入的 doc；react-pdf 的 doc 由其元件 unmount 時自行清理
+    pdfDocCacheRef.current.forEach((doc, fid) => {
+      if (selfLoadedDocIdsRef.current.has(fid)) {
+        doc.destroy();
+      }
+    });
+    pdfDocCacheRef.current.clear();
+    selfLoadedDocIdsRef.current.clear();
+
+    setFiles([]);
+    setActiveFileId(null);
+    pdfDocRef.current = null;
+    brokerPagesRestoredRef.current.clear();
+
+    const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
+    console.log(`[useFileManager][${ts}] 🗑️ Cleared all files`);
+  }, [invalidateSession]);
+
+  // === 多 PdfViewer 預掛載：以活躍檔案為中心，前後展開最多 PDF_CACHE_MAX（7）個 ===
+  // 檔案數 ≤ 7 時全部掛載，超過時以活躍檔案為中心的滑動視窗
+  const mountedFileIds = useMemo(() => {
+    const ids = new Set<string>();
+    if (files.length <= PDF_CACHE_MAX) {
+      // 檔案數量在上限內，全部掛載 → 任意方向切換零延遲
+      for (const f of files) ids.add(f.id);
+    } else {
+      // 超過上限，以活躍檔案為中心前後展開
+      const currentIdx = Math.max(0, files.findIndex((f) => f.id === activeFileId));
+      const half = Math.floor(PDF_CACHE_MAX / 2);
+      let start = Math.max(0, currentIdx - half);
+      let end = start + PDF_CACHE_MAX;
+      if (end > files.length) {
+        end = files.length;
+        start = Math.max(0, end - PDF_CACHE_MAX);
+      }
+      for (let i = start; i < end; i++) {
+        ids.add(files[i].id);
+      }
+    }
+    return ids;
+  }, [files, activeFileId]);
+
+  return {
+    // Core state
+    files, setFiles,
+    activeFileId, setActiveFileId,
+    activeFile, numPages, pageRegions,
+
+    // Refs
+    filesRef, activeFileIdRef, pdfDocRef,
+    updateActiveFileRegions,
+
+    // File operations
+    handleFilesUpload,
+    handleRemoveFile,
+    handleClearAll,
+    handleDocumentLoadForFile,
+
+    // Analysis（轉發自 useAnalysis）
+    isAnalyzing, analysisProgress, error,
+    handleStop, handleReanalyze, handleReanalyzePage, handleRegionDoubleClick,
+    analyzingPagesMap, queuedPagesMap, cancelQueuedPage,
+    analysisFileIdRef,
+
+    // Derived
+    mountedFileIds,
+  };
+}
