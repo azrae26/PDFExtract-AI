@@ -67,6 +67,94 @@ function generateFileId(): string {
   return `file-${Date.now()}-${++_fileIdCounter}`;
 }
 
+/** 券商英文縮寫 / 別名 → brokerSkipMap 中使用的中文名 */
+const BROKER_ALIASES: Record<string, string> = {
+  'KGI': '凱基',
+};
+
+/** 檢查字串是否像日期（7~8 位純數字，如 1150205 或 20250829） */
+function looksLikeDate(s: string): boolean {
+  return /^\d{7,8}$/.test(s);
+}
+
+/**
+ * 從檔名解析券商名稱，支援多種格式：
+ *   `_` 分隔：2454聯發科_1150205_台新.pdf / 20250318_KGI_資安產業.pdf
+ *   `-` 分隔：統一-3217-優群-20250815.pdf / 合庫投顧-3363-上詮-20250526.pdf
+ *   `|` 分隔：2313 華通 | 20260123 | 直邦.pdf
+ *
+ * 解析策略：
+ *   Phase 1 — 用 knownBrokers + 別名在各段中精確/包含匹配（最可靠）
+ *   Phase 2 — 位置啟發式 fallback（`-` 分隔取第一段，其餘取最後一段，須非日期/純數字/過長）
+ */
+function parseBrokerFromFilename(filename: string, knownBrokers: string[]): string | undefined {
+  const nameWithoutExt = filename.replace(/\.pdf$/i, '');
+
+  // === 偵測主分隔符並分段（優先 _ → | → -）===
+  let segments: string[] = [];
+  let separator: '_' | '|' | '-' | null = null;
+
+  const underscoreParts = nameWithoutExt.split('_').map((s) => s.trim()).filter(Boolean);
+  if (underscoreParts.length >= 3) {
+    segments = underscoreParts;
+    separator = '_';
+  } else {
+    const pipeParts = nameWithoutExt.split('|').map((s) => s.trim()).filter(Boolean);
+    if (pipeParts.length >= 3) {
+      segments = pipeParts;
+      separator = '|';
+    } else {
+      const dashParts = nameWithoutExt.split('-').map((s) => s.trim()).filter(Boolean);
+      if (dashParts.length >= 3) {
+        segments = dashParts;
+        separator = '-';
+      }
+    }
+  }
+
+  if (segments.length < 3 || !separator) return undefined;
+
+  // === Phase 1：用 knownBrokers + 別名匹配 ===
+  // 優先順序：最後一段 → 第一段 → 第二段 → 其餘中間段
+  const checkOrder = [
+    segments[segments.length - 1],
+    segments[0],
+    segments[1],
+    ...segments.slice(2, -1),
+  ];
+
+  for (const seg of checkOrder) {
+    // 別名精確匹配（如 KGI → 凱基）
+    const alias = BROKER_ALIASES[seg];
+    if (alias) return alias;
+
+    // 精確匹配
+    if (knownBrokers.includes(seg)) return seg;
+
+    // 包含匹配（如「凱基投顧」包含「凱基」、「元大投顧」包含「元大」）
+    for (const broker of knownBrokers) {
+      if (seg.includes(broker)) return broker;
+    }
+  }
+
+  // === Phase 2：位置啟發式 fallback ===
+  if (separator === '-') {
+    // `-` 分隔格式：券商通常在第一段（如「統一-3217-優群-20250815.pdf」）
+    const first = segments[0].replace(/投顧$/, '').trim();
+    if (first && !looksLikeDate(first) && !/^\d+$/.test(first) && first.length <= 10) {
+      return first;
+    }
+  } else {
+    // `_` 或 `|` 分隔格式：券商通常在最後一段
+    const last = segments[segments.length - 1];
+    if (last && !looksLikeDate(last) && !/^\d+$/.test(last) && last.length <= 10) {
+      return last;
+    }
+  }
+
+  return undefined;
+}
+
 /** 空 Map / Set 常數（避免每次 render 建立新物件導致不必要的 re-render） */
 const EMPTY_MAP = new Map<number, Region[]>();
 const EMPTY_SET = new Set<number>();
@@ -438,6 +526,18 @@ export default function PDFExtractApp() {
   // === 同步 refs（供 updateFileReport 回呼穩定存取最新值）===
   useEffect(() => { skipLastPagesRef.current = skipLastPages; }, [skipLastPages]);
   useEffect(() => { brokerSkipMapRef.current = brokerSkipMap; }, [brokerSkipMap]);
+  // === 同步 brokerSkipMap 到 prompt 中的「券商有：{{...}}」區塊 ===
+  useEffect(() => {
+    const brokerNames = Object.keys(brokerSkipMap);
+    if (brokerNames.length === 0) return;
+    const newBlock = `券商有：{{${brokerNames.join('、')}}}`;
+    setPrompt((prev) => {
+      const pattern = /券商有：\{\{[^}]*\}\}/;
+      if (!pattern.test(prev)) return prev; // prompt 中沒有此區塊，不修改
+      const updated = prev.replace(pattern, newBlock);
+      return updated === prev ? prev : updated; // 內容相同時回傳原參考，避免不必要的 re-render
+    });
+  }, [brokerSkipMap]);
 
   // === 分界線拖動事件處理 ===
   const handlePanelMouseMove = useCallback((e: MouseEvent) => {
@@ -540,15 +640,24 @@ export default function PDFExtractApp() {
       const pdfFiles = newFiles.filter((f) => f.type === 'application/pdf');
       if (pdfFiles.length === 0) return;
 
-      const newEntries: FileEntry[] = pdfFiles.map((file) => ({
-        id: generateFileId(),
-        file,
-        url: URL.createObjectURL(file),
-        name: file.name,
-        status: 'queued' as const,
-        numPages: 0,
-        pageRegions: new Map(),
-      }));
+      const knownBrokers = Object.keys(brokerSkipMapRef.current);
+      const newEntries: FileEntry[] = pdfFiles.map((file) => {
+        const broker = parseBrokerFromFilename(file.name, knownBrokers);
+        if (broker) {
+          const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
+          console.log(`[PDFExtractApp][${ts}] 🏢 Broker "${broker}" detected from filename: ${file.name}`);
+        }
+        return {
+          id: generateFileId(),
+          file,
+          url: URL.createObjectURL(file),
+          name: file.name,
+          status: 'queued' as const,
+          numPages: 0,
+          pageRegions: new Map(),
+          report: broker,
+        };
+      });
 
       setFiles((prev) => [...prev, ...newEntries]);
 
