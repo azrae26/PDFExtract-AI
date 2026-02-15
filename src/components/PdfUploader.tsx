@@ -12,8 +12,6 @@ import { useState, useRef, useEffect } from 'react';
 
 /** Gemini 模型選項 */
 export const GEMINI_MODELS = [
-  { id: 'gemini-2.0-flash', label: 'Gemini 2.0 Flash', desc: '快速輕量（2026/3 停用）' },
-  { id: 'gemini-2.0-flash-lite', label: 'Gemini 2.0 Flash Lite', desc: '最便宜最快（2026/3 停用）' },
   { id: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash', desc: '高性價比，帶思考能力' },
   { id: 'gemini-3-flash-preview', label: 'Gemini 3 Flash', desc: '最新一代，速度與品質平衡' },
   { id: 'gemini-3-pro-preview', label: 'Gemini 3 Pro', desc: '最強推理能力，旗艦模型' },

@@ -41,7 +41,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<Recognize
       );
     }
 
-    const selectedModel = modelId || 'gemini-2.0-flash';
+    const selectedModel = modelId || 'gemini-2.5-flash';
     const imageSizeKB = Math.round((image.length * 3) / 4 / 1024);
     console.log(`[RecognizeRoute][${timestamp}] 🔍 Recognizing page ${page} region ${regionId} with ${selectedModel} (image: ${imageSizeKB} KB)...`);
 

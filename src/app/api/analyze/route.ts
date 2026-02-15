@@ -36,7 +36,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<AnalyzeRe
       );
     }
 
-    const selectedModel = modelId || 'gemini-2.0-flash';
+    const selectedModel = modelId || 'gemini-2.5-flash';
     const imageSizeKB = Math.round((image.length * 3) / 4 / 1024);
     console.log(`[AnalyzeRoute][${timestamp}] 📄 Analyzing page ${page} with ${selectedModel} (image: ${imageSizeKB} KB)...`);
 
