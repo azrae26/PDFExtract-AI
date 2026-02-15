@@ -1,8 +1,9 @@
 /**
  * 功能：從 PDF 頁面的文字層中，根據 bounding box 座標提取文字，並自動校正不完整的 bbox
  * 職責：接收 pdfjs PDFPageProxy + Region[]，利用 getTextContent() 取得文字項，
- *       1. snapBboxToText：水平方向重疊比例校正 + Y 軸半行補足
+ *       1. snapBboxToText：水平方向重疊比例校正 + Y 軸任何重疊即補足完整行高
  *       2. resolveOverlappingLines：同一行被多個框覆蓋時，根據行距判斷退縮方向
+ *       2.5. enforceMinVerticalGap：擴張後框間上下間距不足時各自退縮，保證最小間距
  *       3. 根據校正後的歸一化座標 (0~1000) 判斷哪些文字落在各個 bbox 內，回傳填入 text 的 Region[]
  *       同一行內若偵測到明顯水平間距（表格不同欄），自動插入 TAB 分隔
  * 依賴：pdfjs-dist (PDFPageProxy)
@@ -43,17 +44,23 @@ const SNAP_MAX_ITERATIONS = 3;
 const SNAP_OVERLAP_RATIO = 0.5;
 /** 同一行判定閾值（歸一化單位，Y 差距小於此值視為同一行） */
 const SAME_LINE_THRESHOLD = 15;
+/** 框間最小垂直間距（歸一化單位），擴張後上下太近時各自退縮 */
+const MIN_VERTICAL_GAP = 5;
+/** 降部補償比例：PDF 文字項 height 通常為 em height，降部約佔 15%（依字型而異） */
+const DESCENDER_RATIO = 0.15;
 
 /**
  * 自動校正 bbox 邊界
  * - 水平方向：重疊比例 >= 50% 才擴展（避免吃到相鄰區塊）
- * - 垂直方向：半行補足 — 框切到一行字的上半或下半時，補足到完整行高（重疊比例 >= 50%）
+ * - 垂直方向：只要框碰到該行就補足到完整行高（任何重疊即擴展）
  */
 function snapBboxToText(
   bbox: [number, number, number, number],
   textItems: NormTextItem[],
 ): [number, number, number, number] {
   let [x1, y1, x2, y2] = bbox;
+  // 追蹤決定 y2 底部邊緣的文字項高度（用於計算降部補償）
+  let bottomEdgeH = 0;
 
   // 迭代擴展 — 只納入重疊比例 >= 50% 的文字項目
   let changed = true;
@@ -82,13 +89,18 @@ function snapBboxToText(
         if (tiRight > x2) { x2 = tiRight; changed = true; }
       }
 
-      // 垂直方向：半行補足 — 重疊比例 >= 50% 才補（框切到字的中間時補齊）
-      const yRatio = ti.normH > 0 ? overlapHeight / ti.normH : 0;
-      if (yRatio >= SNAP_OVERLAP_RATIO) {
+      // 垂直方向：只要框碰到該行就補足到完整行高（任何重疊即擴展）
+      if (overlapHeight > 0) {
         if (ti.normY < y1) { y1 = ti.normY; changed = true; }
-        if (tiBottom > y2) { y2 = tiBottom; changed = true; }
+        if (tiBottom > y2) { y2 = tiBottom; bottomEdgeH = ti.normH; changed = true; }
       }
     }
+  }
+
+  // 底部降部補償：根據決定 y2 的文字項高度動態計算（而非固定值）
+  // 框間衝突由後續的 resolveOverlappingLines / enforceMinVerticalGap 處理
+  if (bottomEdgeH > 0) {
+    y2 = Math.min(NORMALIZED_MAX, y2 + bottomEdgeH * DESCENDER_RATIO);
   }
 
   return [x1, y1, x2, y2];
@@ -165,6 +177,39 @@ function resolveOverlappingLines(
     } else {
       // 上方行距小 → 此行屬於上方段落 → 下方框退縮 y1
       bboxes[lowerIdx][1] = Math.max(bboxes[lowerIdx][1], line.bottomY);
+    }
+  }
+}
+
+/**
+ * 擴張後框間最小垂直間距保證：
+ * 對所有 X 方向有重疊的框對，若上下間距 < MIN_VERTICAL_GAP，各自退縮一半使間距達標
+ * 直接修改 bboxes 陣列（in-place）
+ */
+function enforceMinVerticalGap(
+  bboxes: [number, number, number, number][],
+): void {
+  if (bboxes.length < 2) return;
+
+  for (let i = 0; i < bboxes.length; i++) {
+    for (let j = i + 1; j < bboxes.length; j++) {
+      // X 方向無重疊則跳過（左右不同欄的框不需要退縮）
+      const xOverlap = Math.min(bboxes[i][2], bboxes[j][2]) - Math.max(bboxes[i][0], bboxes[j][0]);
+      if (xOverlap <= 0) continue;
+
+      // 判斷哪個在上、哪個在下
+      const upperIdx = bboxes[i][1] <= bboxes[j][1] ? i : j;
+      const lowerIdx = upperIdx === i ? j : i;
+
+      const gap = bboxes[lowerIdx][1] - bboxes[upperIdx][3];
+      if (gap >= MIN_VERTICAL_GAP) continue;
+
+      const deficit = MIN_VERTICAL_GAP - gap;
+      const half = deficit / 2;
+
+      // 各自退縮一半
+      bboxes[upperIdx][3] -= half;
+      bboxes[lowerIdx][1] += half;
     }
   }
 }
@@ -269,6 +314,9 @@ export async function extractTextForRegions(
 
   // === Phase 2: Resolve — 跨 region 重疊行解衝突 ===
   resolveOverlappingLines(snappedBboxes, textItems);
+
+  // === Phase 2.5: 保證框間最小垂直間距 ===
+  enforceMinVerticalGap(snappedBboxes);
 
   // === Phase 3: 提取文字 + 組裝結果 ===
   return regions.map((region, i) => {

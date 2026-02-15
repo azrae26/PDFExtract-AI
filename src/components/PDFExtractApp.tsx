@@ -597,6 +597,7 @@ export default function PDFExtractApp() {
   }, []);
 
   // === 處理佇列中的下一個檔案 ===
+  // 不自動切換 activeFileId（使用者留在目前檢視的檔案），僅在無活躍檔案時才設定
   // 若 pdfDocCacheRef 已有該檔案的 doc（PdfViewer 預掛載已載入），直接呼叫 analyzeAllPages
   // 否則等 handleDocumentLoadForFile 觸發（防止雙重啟動由 analysisFileIdRef 守衛）
   const processNextInQueue = useCallback(() => {
@@ -607,8 +608,10 @@ export default function PDFExtractApp() {
       return;
     }
 
-    // 將下一個設為 processing 並切換為活躍檔案
-    setActiveFileId(nextQueued.id);
+    // 只在沒有活躍檔案時才自動切換（首次上傳 / 全部清空後），否則分析在背景進行
+    if (!activeFileIdRef.current) {
+      setActiveFileId(nextQueued.id);
+    }
     setFiles((prev) =>
       prev.map((f) =>
         f.id === nextQueued.id ? { ...f, status: 'processing' as const } : f
