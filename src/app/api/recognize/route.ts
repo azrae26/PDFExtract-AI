@@ -7,6 +7,11 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { NextRequest, NextResponse } from 'next/server';
 
+/** 模型 429 配額耗盡時的自動退回映射 */
+const MODEL_FALLBACK: Record<string, string> = {
+  'gemini-3-pro-preview': 'gemini-3-flash-preview',
+};
+
 interface RecognizeResponse {
   success: boolean;
   text?: string;
@@ -41,9 +46,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<Recognize
     console.log(`[RecognizeRoute][${timestamp}] 🔍 Recognizing page ${page} region ${regionId} with ${selectedModel} (image: ${imageSizeKB} KB)...`);
 
     const genAI = new GoogleGenerativeAI(apiKey);
-    const model = genAI.getGenerativeModel({ model: selectedModel });
-
-    const result = await model.generateContent([
+    const contentParts = [
       prompt,
       {
         inlineData: {
@@ -51,7 +54,31 @@ export async function POST(request: NextRequest): Promise<NextResponse<Recognize
           data: image,
         },
       },
-    ]);
+    ];
+
+    let actualModel = selectedModel;
+    let result;
+
+    try {
+      const modelObj = genAI.getGenerativeModel({ model: selectedModel });
+      result = await modelObj.generateContent(contentParts);
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      const fallback = MODEL_FALLBACK[selectedModel];
+      if (fallback && errMsg.includes('429')) {
+        const ts2 = new Date().toLocaleTimeString('en-US', { hour12: false });
+        console.log(`[RecognizeRoute][${ts2}] ⚠️ ${selectedModel} quota exceeded, falling back to ${fallback}...`);
+        actualModel = fallback;
+        const fallbackObj = genAI.getGenerativeModel({ model: fallback });
+        result = await fallbackObj.generateContent(contentParts);
+      } else {
+        throw err;
+      }
+    }
+
+    if (actualModel !== selectedModel) {
+      console.log(`[RecognizeRoute][${timestamp}] 🔄 Used fallback model: ${actualModel} (requested: ${selectedModel})`);
+    }
 
     let text = result.response.text().trim();
 

@@ -1,7 +1,7 @@
 /**
  * 功能：PDF 頁面分析核心邏輯 Custom Hook
- * 職責：頁面轉圖、API 呼叫（含失敗自動重試最多 2 次）、跨檔案 worker pool 並行分析、單頁重送（支援多頁累加計數）、雙擊截圖識別、佇列頁面取消、per-file analyzingPagesMap
- * 依賴：react、pdfjs、types、constants、pdfTextExtract
+ * 職責：跨檔案 worker pool 並行分析、單頁重送（支援多頁累加計數）、佇列頁面取消、per-file analyzingPagesMap、整合雙擊識別
+ * 依賴：react、pdfjs、types、analysisHelpers、useRegionRecognize
  *
  * 重要設計：
  * - 所有非同步操作都傳入 pdfDoc 快照 + sessionId，避免切換檔案後存取已銷毀的 PDF document
@@ -10,26 +10,19 @@
  * - analysisFileIdRef 追蹤目前分析的主要目標檔案 ID
  * - queuedPagesMap（per-file）追蹤排隊中的頁碼，skippedPagesRef（per-file）記錄被使用者取消的頁碼
  * - analyzeAllPages 支援 getNextFile callback，worker 在 task queue 耗盡時自動拉入下一個排隊檔案
+ * - 雙擊區域識別委託給 useRegionRecognize hook，isAnalyzing 合併兩者狀態
  */
 
 import { useState, useCallback, useRef } from 'react';
 import { pdfjs } from 'react-pdf';
 import { Region } from '@/lib/types';
-import { RENDER_SCALE, JPEG_QUALITY, NORMALIZED_MAX } from '@/lib/constants';
-import { extractTextForRegions } from '@/lib/pdfTextExtract';
-
-// === API 失敗重試設定 ===
-const MAX_RETRIES = 2; // 最多重試 2 次（總共 3 次嘗試）
-const RETRY_BASE_DELAY_MS = 1500; // 首次重試等待 1.5 秒，之後遞增
-
-/** 檔案級 regions 更新器：直接寫入 files 陣列（Single Source of Truth） */
-type FileRegionsUpdater = (
-  targetFileId: string,
-  updater: (prev: Map<number, Region[]>) => Map<number, Region[]>,
-) => void;
-
-/** 檔案級 report 更新器：更新指定檔案的券商名 */
-type FileReportUpdater = (targetFileId: string, report: string) => void;
+import {
+  FileRegionsUpdater,
+  FileReportUpdater,
+  analyzePageWithRetry,
+  mergePageResult,
+} from './analysisHelpers';
+import useRegionRecognize from './useRegionRecognize';
 
 interface UseAnalysisOptions {
   pdfDocRef: React.MutableRefObject<pdfjs.PDFDocumentProxy | null>;
@@ -52,7 +45,7 @@ export default function useAnalysis({
   model,
   batchSize,
 }: UseAnalysisOptions) {
-  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [batchIsAnalyzing, setBatchIsAnalyzing] = useState(false);
   const [analysisProgress, setAnalysisProgress] = useState({ current: 0, total: 0 });
   const [error, setError] = useState<string | null>(null);
   // 正在分析中的頁碼（per-file Map），key = fileId, value = Set<pageNum>
@@ -104,182 +97,16 @@ export default function useAnalysis({
     });
   }, []);
 
-  // === 將 PDF 單頁渲染為 JPEG 圖片 ===
-  // 傳入 pdfDoc 快照 + sessionId，避免使用可能已被替換的 pdfDocRef.current
-  const renderPageToImage = useCallback(async (
-    pageNum: number,
-    pdfDoc: pdfjs.PDFDocumentProxy,
-    sessionId: number,
-  ): Promise<string | null> => {
-    if (!isSessionValid(sessionId)) return null;
+  // === 雙擊區域識別（委託給獨立 hook）===
+  const { handleRegionDoubleClick, isRecognizing } = useRegionRecognize({
+    pdfDocRef,
+    updateFileRegions,
+    tablePrompt,
+    model,
+  });
 
-    const timestamp = new Date().toLocaleTimeString('en-US', { hour12: false });
-    console.log(`[useAnalysis][${timestamp}] 🖼️ Rendering page ${pageNum} to image...`);
-
-    try {
-      const page = await pdfDoc.getPage(pageNum);
-      if (!isSessionValid(sessionId)) return null;
-
-      const viewport = page.getViewport({ scale: RENDER_SCALE });
-
-      const canvas = document.createElement('canvas');
-      canvas.width = viewport.width;
-      canvas.height = viewport.height;
-      const ctx = canvas.getContext('2d')!;
-
-      await page.render({ canvas, canvasContext: ctx, viewport }).promise;
-
-      if (!isSessionValid(sessionId)) {
-        canvas.remove();
-        return null;
-      }
-
-      const dataUrl = canvas.toDataURL('image/jpeg', JPEG_QUALITY);
-      const w = canvas.width;
-      const h = canvas.height;
-      canvas.remove();
-
-      const base64 = dataUrl.split(',')[1];
-      const sizeKB = Math.round((base64.length * 3) / 4 / 1024);
-      const ts2 = new Date().toLocaleTimeString('en-US', { hour12: false });
-      console.log(`[useAnalysis][${ts2}] 📐 Page ${pageNum} JPEG: ${w}x${h}px, ${sizeKB} KB (scale=${RENDER_SCALE}, quality=${JPEG_QUALITY})`);
-      return base64;
-    } catch (e) {
-      // RenderingCancelledException 或 document 已銷毀 → 靜默返回 null
-      const eName = (e as { name?: string })?.name ?? '';
-      const isCancel = eName === 'RenderingCancelledException' || !isSessionValid(sessionId);
-      if (isCancel || String(e).includes('sendWithPromise')) {
-        const ts2 = new Date().toLocaleTimeString('en-US', { hour12: false });
-        console.log(`[useAnalysis][${ts2}] ⚠️ Rendering cancelled for page ${pageNum} (file switched or aborted)`);
-        return null;
-      }
-      throw e;
-    }
-  }, [isSessionValid]);
-
-  // === 分析單頁（含失敗自動重試最多 2 次）===
-  const analyzePage = useCallback(
-    async (
-      pageNum: number,
-      promptText: string,
-      modelId: string,
-      pdfDoc: pdfjs.PDFDocumentProxy,
-      sessionId: number,
-    ) => {
-      const imageBase64 = await renderPageToImage(pageNum, pdfDoc, sessionId);
-      if (!imageBase64) return null; // rendering 被取消或 session 失效
-
-      for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-        if (!isSessionValid(sessionId)) return null;
-
-        const timestamp = new Date().toLocaleTimeString('en-US', { hour12: false });
-
-        try {
-          if (attempt > 0) {
-            console.log(`[useAnalysis][${timestamp}] 🔄 Page ${pageNum} retry ${attempt}/${MAX_RETRIES}...`);
-          } else {
-            console.log(`[useAnalysis][${timestamp}] 📤 Sending page ${pageNum} to API (model: ${modelId})...`);
-          }
-
-          const response = await fetch('/api/analyze', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              image: imageBase64,
-              prompt: promptText,
-              page: pageNum,
-              model: modelId,
-            }),
-          });
-
-          const result = await response.json();
-
-          if (result.success) {
-            console.log(
-              `[useAnalysis][${timestamp}] ✅ Page ${pageNum}: ${result.data.regions.length} regions found`
-            );
-            return result.data;
-          }
-
-          console.error(`[useAnalysis][${timestamp}] ❌ Page ${pageNum} failed (attempt ${attempt + 1}/${MAX_RETRIES + 1}):`, result.error);
-
-          if (attempt < MAX_RETRIES) {
-            const delay = RETRY_BASE_DELAY_MS * (attempt + 1);
-            console.log(`[useAnalysis][${timestamp}] ⏳ Waiting ${delay}ms before retry...`);
-            await new Promise((r) => setTimeout(r, delay));
-            continue;
-          }
-
-          return null;
-        } catch (err) {
-          const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
-          console.error(`[useAnalysis][${ts}] ❌ Error analyzing page ${pageNum} (attempt ${attempt + 1}/${MAX_RETRIES + 1}):`, err);
-
-          if (attempt < MAX_RETRIES) {
-            const delay = RETRY_BASE_DELAY_MS * (attempt + 1);
-            console.log(`[useAnalysis][${ts}] ⏳ Waiting ${delay}ms before retry...`);
-            await new Promise((r) => setTimeout(r, delay));
-            continue;
-          }
-
-          return null;
-        }
-      }
-
-      return null;
-    },
-    [renderPageToImage, isSessionValid]
-  );
-
-  /** 處理單頁分析結果：提取文字 + merge 到 pageRegions + 儲存券商名 */
-  // 傳入 pdfDoc 快照 + sessionId + targetFileId
-  const mergePageResult = useCallback(
-    async (
-      pageNum: number,
-      result: { hasAnalysis: boolean; report?: string; regions: Region[] },
-      pdfDoc: pdfjs.PDFDocumentProxy,
-      sessionId: number,
-      targetFileId: string,
-    ) => {
-      // 儲存券商名（只要有 report 就更新，即使沒有 regions）
-      if (result.report) {
-        updateFileReport(targetFileId, result.report);
-      }
-
-      if (!result.hasAnalysis || result.regions.length === 0) return;
-      if (!isSessionValid(sessionId)) return;
-
-      let regionsWithText = result.regions;
-      try {
-        const pdfPage = await pdfDoc.getPage(pageNum);
-        if (!isSessionValid(sessionId)) return;
-        regionsWithText = await extractTextForRegions(pdfPage, result.regions);
-      } catch (e) {
-        // document 已銷毀時不要噴錯
-        if (!isSessionValid(sessionId)) return;
-        console.warn(`[useAnalysis] ⚠️ Text extraction failed for page ${pageNum}`, e);
-      }
-
-      if (!isSessionValid(sessionId)) return;
-
-      // Merge：保留 userModified 的 regions，追加 AI 新結果
-      const mergeUpdater = (prev: Map<number, Region[]>) => {
-        const updated = new Map(prev);
-        const existing = updated.get(pageNum) || [];
-        const userRegions = existing.filter((r) => r.userModified);
-        const maxExistingId = userRegions.reduce((max, r) => Math.max(max, r.id), 0);
-        const aiRegions = regionsWithText.map((r: Region, i: number) => ({
-          ...r,
-          id: maxExistingId + i + 1,
-          userModified: false,
-        }));
-        updated.set(pageNum, [...userRegions, ...aiRegions]);
-        return updated;
-      };
-      updateFileRegions(targetFileId, mergeUpdater);
-    },
-    [isSessionValid, updateFileRegions, updateFileReport]
-  );
+  // 合併分析狀態：批次分析 或 區域識別 任一進行中即為 true
+  const isAnalyzing = batchIsAnalyzing || isRecognizing;
 
   // === 自動分析所有頁面（跨檔案 worker pool，merge 不覆蓋 userModified）===
   // 自己用 pdfjs.getDocument 載入獨立 pdfDoc，不依賴 react-pdf 的 document（切檔不會被銷毀）
@@ -307,7 +134,7 @@ export default function useAnalysis({
       abortRef.current = false;
       stoppedByUserRef.current = false;
       skippedPagesRef.current = new Map();
-      setIsAnalyzing(true);
+      setBatchIsAnalyzing(true);
       setError(null);
 
       // === 跨檔案 worker pool 資料結構 ===
@@ -327,7 +154,7 @@ export default function useAnalysis({
         const ts2 = new Date().toLocaleTimeString('en-US', { hour12: false });
         console.error(`[useAnalysis][${ts2}] ❌ Failed to load PDF for analysis:`, e);
         setError('無法載入 PDF 檔案');
-        setIsAnalyzing(false);
+        setBatchIsAnalyzing(false);
         analysisFileIdRef.current = null;
         return;
       }
@@ -499,7 +326,7 @@ export default function useAnalysis({
         });
         addAnalyzingPage(fileId, pageNum);
 
-        const result = await analyzePage(pageNum, promptText, modelId, pdfDoc, sessionId);
+        const result = await analyzePageWithRetry(pageNum, promptText, modelId, pdfDoc, sessionId, isSessionValid);
 
         // 分析完成，移除標記
         removeAnalyzingPage(fileId, pageNum);
@@ -512,7 +339,7 @@ export default function useAnalysis({
         setAnalysisProgress({ current: globalCompleted, total: globalTotal });
 
         if (result) {
-          await mergePageResult(pageNum, result, pdfDoc, sessionId, fileId);
+          await mergePageResult(pageNum, result, pdfDoc, sessionId, isSessionValid, fileId, updateFileRegions, updateFileReport);
         }
 
         // 檢查此檔案是否全部完成
@@ -550,13 +377,13 @@ export default function useAnalysis({
       // 只有 session 仍有效時才設定完成狀態（否則可能覆蓋新 session 的狀態）
       // 注意：不在這裡清除 analysisFileIdRef，由 PDFExtractApp 的 completion effect 讀取後清除
       if (isSessionValid(sessionId)) {
-        setIsAnalyzing(false);
+        setBatchIsAnalyzing(false);
         setQueuedPagesMap(new Map());
         const endTimestamp = new Date().toLocaleTimeString('en-US', { hour12: false });
         console.log(`[useAnalysis][${endTimestamp}] 🏁 All analysis complete (session=${sessionId}).`);
       }
     },
-    [analyzePage, mergePageResult, updateFileRegions, isSessionValid, addAnalyzingPage, removeAnalyzingPage]
+    [updateFileRegions, updateFileReport, isSessionValid, addAnalyzingPage, removeAnalyzingPage]
   );
 
   // === 停止分析 ===
@@ -565,7 +392,7 @@ export default function useAnalysis({
     stoppedByUserRef.current = true;
     analysisSessionRef.current++; // 讓飛行中操作全部失效
     analysisFileIdRef.current = null;
-    setIsAnalyzing(false);
+    setBatchIsAnalyzing(false);
     setAnalyzingPagesMap(new Map());
     setQueuedPagesMap(new Map());
     skippedPagesRef.current = new Map();
@@ -578,7 +405,7 @@ export default function useAnalysis({
     abortRef.current = true;
     analysisSessionRef.current++;
     inFlightPageRef.current = 0;
-    setIsAnalyzing(false);
+    setBatchIsAnalyzing(false);
     setAnalysisProgress({ current: 0, total: 0 });
     setAnalyzingPagesMap(new Map());
     setQueuedPagesMap(new Map());
@@ -621,8 +448,17 @@ export default function useAnalysis({
   // 如果該頁在佇列中，先從佇列移除（標記 skipped），避免批次迴圈重複處理
   const handleReanalyzePage = useCallback(
     async (pageNum: number, targetFileId: string) => {
+      if (!targetFileId) return;
+
+      // 先清除該頁的 ALL regions（先清再跑，包含 userModified）
+      updateFileRegions(targetFileId, (prev) => {
+        const updated = new Map(prev);
+        updated.delete(pageNum);
+        return updated;
+      });
+
       const pdfDoc = pdfDocRef.current;
-      if (!pdfDoc || !targetFileId) return;
+      if (!pdfDoc) return;
       const sessionId = analysisSessionRef.current; // 用當前 session（不遞增，因為是單頁操作）
 
       // 如果該頁在佇列中，先取消（讓批次迴圈跳過它）
@@ -651,7 +487,7 @@ export default function useAnalysis({
 
       // 累加進度，而非覆蓋
       inFlightPageRef.current++;
-      setIsAnalyzing(true);
+      setBatchIsAnalyzing(true);
       setAnalysisProgress((prev) => ({
         current: prev.current,
         total: prev.total + 1,
@@ -661,20 +497,7 @@ export default function useAnalysis({
       // 標記此頁正在分析（per-file）
       addAnalyzingPage(targetFileId, pageNum);
 
-      // 清除該頁的非 userModified regions
-      updateFileRegions(targetFileId, (prev) => {
-        const updated = new Map(prev);
-        const existing = updated.get(pageNum) || [];
-        const userRegions = existing.filter((r) => r.userModified);
-        if (userRegions.length > 0) {
-          updated.set(pageNum, userRegions);
-        } else {
-          updated.delete(pageNum);
-        }
-        return updated;
-      });
-
-      const result = await analyzePage(pageNum, prompt, model, pdfDoc, sessionId);
+      const result = await analyzePageWithRetry(pageNum, prompt, model, pdfDoc, sessionId, isSessionValid);
 
       // 完成：累加 current，而非直接設定
       setAnalysisProgress((prev) => ({
@@ -686,170 +509,18 @@ export default function useAnalysis({
       removeAnalyzingPage(targetFileId, pageNum);
 
       if (result && isSessionValid(sessionId)) {
-        await mergePageResult(pageNum, result, pdfDoc, sessionId, targetFileId);
+        await mergePageResult(pageNum, result, pdfDoc, sessionId, isSessionValid, targetFileId, updateFileRegions, updateFileReport);
       }
 
       // 只有當所有飛行中的頁面都完成時才停止分析狀態
       inFlightPageRef.current--;
       if (inFlightPageRef.current === 0) {
-        setIsAnalyzing(false);
+        setBatchIsAnalyzing(false);
         // 重置進度（避免下次累計混亂）
         setAnalysisProgress({ current: 0, total: 0 });
       }
     },
-    [prompt, model, analyzePage, mergePageResult, pdfDocRef, updateFileRegions, isSessionValid, queuedPagesMap, addAnalyzingPage, removeAnalyzingPage]
-  );
-
-  // === 雙擊框框 → 截圖該區域 → 送 AI 識別（表格/圖表） ===
-  // 由呼叫端傳入完整 region 物件 + fileId，不依賴共用 state
-  const handleRegionDoubleClick = useCallback(
-    async (page: number, region: Region, targetFileId: string) => {
-      const pdfDoc = pdfDocRef.current;
-      if (!pdfDoc || !targetFileId) return;
-      const regionId = region.id;
-      const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
-      console.log(`[useAnalysis][${ts}] 🖱️ Double-click on page ${page} region ${regionId}, capturing...`);
-
-      setIsAnalyzing(true);
-      setAnalysisProgress({ current: 0, total: 1 });
-      setError(null);
-
-      try {
-        // 用 pdfjs 渲染整頁到 canvas，然後裁切目標區域
-        const pdfPage = await pdfDoc.getPage(page);
-        const viewport = pdfPage.getViewport({ scale: RENDER_SCALE });
-
-        const fullCanvas = document.createElement('canvas');
-        fullCanvas.width = viewport.width;
-        fullCanvas.height = viewport.height;
-        const ctx = fullCanvas.getContext('2d')!;
-        await pdfPage.render({ canvas: fullCanvas, canvasContext: ctx, viewport }).promise;
-
-        // bbox 歸一化座標 → 像素座標
-        const [x1, y1, x2, y2] = region.bbox;
-        const sx = (x1 / NORMALIZED_MAX) * viewport.width;
-        const sy = (y1 / NORMALIZED_MAX) * viewport.height;
-        const sw = ((x2 - x1) / NORMALIZED_MAX) * viewport.width;
-        const sh = ((y2 - y1) / NORMALIZED_MAX) * viewport.height;
-
-        // 裁切到新 canvas
-        const cropCanvas = document.createElement('canvas');
-        cropCanvas.width = Math.round(sw);
-        cropCanvas.height = Math.round(sh);
-        const cropCtx = cropCanvas.getContext('2d')!;
-        cropCtx.drawImage(fullCanvas, sx, sy, sw, sh, 0, 0, cropCanvas.width, cropCanvas.height);
-
-        // 轉 base64 JPEG
-        const dataUrl = cropCanvas.toDataURL('image/jpeg', JPEG_QUALITY);
-        const base64 = dataUrl.split(',')[1];
-        const sizeKB = Math.round((base64.length * 3) / 4 / 1024);
-
-        fullCanvas.remove();
-        cropCanvas.remove();
-
-        console.log(`[useAnalysis][${ts}] 📐 Cropped region: ${cropCanvas.width}x${cropCanvas.height}px, ${sizeKB} KB`);
-
-        // 標記載入中（先在文字欄顯示「識別中...」）
-        updateFileRegions(targetFileId, (prev) => {
-          const updated = new Map(prev);
-          const rs = updated.get(page);
-          if (rs) {
-            updated.set(page, rs.map((r) =>
-              r.id === regionId ? { ...r, text: '⏳ AI 識別中...', userModified: true } : r
-            ));
-          }
-          return updated;
-        });
-
-        // 送 API（含重試）
-        let lastError = '';
-        for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-          try {
-            if (attempt > 0) {
-              const retryTs = new Date().toLocaleTimeString('en-US', { hour12: false });
-              console.log(`[useAnalysis][${retryTs}] 🔄 Region recognize retry ${attempt}/${MAX_RETRIES}...`);
-            }
-
-            const response = await fetch('/api/recognize', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                image: base64,
-                prompt: tablePrompt,
-                model,
-                page,
-                regionId,
-              }),
-            });
-            const result = await response.json();
-
-            setAnalysisProgress({ current: 1, total: 1 });
-
-            if (result.success && result.text) {
-              updateFileRegions(targetFileId, (prev) => {
-                const updated = new Map(prev);
-                const rs = updated.get(page);
-                if (rs) {
-                  updated.set(page, rs.map((r) =>
-                    r.id === regionId ? { ...r, text: result.text, userModified: true } : r
-                  ));
-                }
-                return updated;
-              });
-              const ts2 = new Date().toLocaleTimeString('en-US', { hour12: false });
-              console.log(`[useAnalysis][${ts2}] ✅ Region ${regionId} recognized: ${result.text.length} chars`);
-              return; // 成功，結束
-            }
-
-            lastError = result.error || '未知錯誤';
-            if (attempt < MAX_RETRIES) {
-              const delay = RETRY_BASE_DELAY_MS * (attempt + 1);
-              await new Promise((r) => setTimeout(r, delay));
-              continue;
-            }
-          } catch (err) {
-            lastError = err instanceof Error ? err.message : '未知錯誤';
-            if (attempt < MAX_RETRIES) {
-              const delay = RETRY_BASE_DELAY_MS * (attempt + 1);
-              await new Promise((r) => setTimeout(r, delay));
-              continue;
-            }
-          }
-        }
-
-        // 所有重試都失敗
-        updateFileRegions(targetFileId, (prev) => {
-          const updated = new Map(prev);
-          const rs = updated.get(page);
-          if (rs) {
-            updated.set(page, rs.map((r) =>
-              r.id === regionId ? { ...r, text: `❌ 識別失敗: ${lastError}` } : r
-            ));
-          }
-          return updated;
-        });
-      } catch (e) {
-        // document 銷毀的錯誤靜默處理
-        if (String(e).includes('sendWithPromise') || (e as { name?: string })?.name === 'RenderingCancelledException') {
-          console.log(`[useAnalysis][${ts}] ⚠️ Region double-click cancelled (file switched)`);
-          return;
-        }
-        console.error(`[useAnalysis][${ts}] ❌ Region double-click error:`, e);
-        updateFileRegions(targetFileId, (prev) => {
-          const updated = new Map(prev);
-          const rs = updated.get(page);
-          if (rs) {
-            updated.set(page, rs.map((r) =>
-              r.id === regionId ? { ...r, text: `❌ 識別失敗: ${e instanceof Error ? e.message : '未知錯誤'}` } : r
-            ));
-          }
-          return updated;
-        });
-      } finally {
-        setIsAnalyzing(false);
-      }
-    },
-    [pdfDocRef, tablePrompt, model, updateFileRegions]
+    [prompt, model, pdfDocRef, updateFileRegions, updateFileReport, isSessionValid, queuedPagesMap, addAnalyzingPage, removeAnalyzingPage]
   );
 
   return {

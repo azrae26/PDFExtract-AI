@@ -19,7 +19,7 @@ export const GEMINI_MODELS = [
   { id: 'gemini-3-pro-preview', label: 'Gemini 3 Pro', desc: '最強推理能力，旗艦模型' },
 ] as const;
 
-export const DEFAULT_MODEL = 'gemini-3-pro-preview';
+export const DEFAULT_MODEL = 'gemini-3-flash-preview';
 
 interface PdfUploaderProps {
   prompt: string;
