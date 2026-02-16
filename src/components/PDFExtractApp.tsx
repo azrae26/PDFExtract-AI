@@ -144,6 +144,29 @@ export default function PDFExtractApp() {
   useEffect(() => { saveConfig({ leftWidth }); }, [leftWidth]);
   useEffect(() => { saveConfig({ rightWidth }); }, [rightWidth]);
 
+  // === 啟動時從伺服器載入共享設定（覆蓋本地 localStorage） ===
+  useEffect(() => {
+    fetch('/api/settings')
+      .then((res) => res.json())
+      .then((json) => {
+        if (!json.success || !json.data) return;
+        const d = json.data;
+        if (typeof d.prompt === 'string') setPrompt(d.prompt);
+        if (typeof d.tablePrompt === 'string') setTablePrompt(d.tablePrompt);
+        if (typeof d.model === 'string') setModel(d.model);
+        if (typeof d.batchSize === 'number') setBatchSize(d.batchSize);
+        if (typeof d.skipLastPages === 'number') setSkipLastPages(d.skipLastPages);
+        if (typeof d.brokerSkipMap === 'object' && d.brokerSkipMap !== null) {
+          setBrokerSkipMap(d.brokerSkipMap);
+        }
+        if (typeof d.fileListWidth === 'number') setFileListWidth(d.fileListWidth);
+        if (typeof d.leftWidth === 'number') setLeftWidth(d.leftWidth);
+        if (typeof d.rightWidth === 'number') setRightWidth(d.rightWidth);
+      })
+      .catch(() => { /* 網路錯誤靜默失敗，繼續使用本地設定 */ });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // === 同步 brokerSkipMap 到 prompt 中的「券商有：{{...}}」區塊 ===
   useEffect(() => {
     const brokerNames = Object.keys(brokerSkipMap);
@@ -156,6 +179,33 @@ export default function PDFExtractApp() {
       return updated === prev ? prev : updated; // 內容相同時回傳原參考，避免不必要的 re-render
     });
   }, [brokerSkipMap]);
+
+  // === 上傳設定到伺服器 ===
+  const handleUploadSettings = useCallback(async () => {
+    const password = window.prompt('請輸入上傳密碼');
+    if (!password) return;
+
+    const settings = {
+      prompt, tablePrompt, model, batchSize, skipLastPages, brokerSkipMap,
+      fileListWidth, leftWidth, rightWidth,
+    };
+
+    try {
+      const res = await fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password, settings }),
+      });
+      const json = await res.json();
+      if (json.success) {
+        alert('設定已上傳到伺服器！');
+      } else {
+        alert(`上傳失敗：${json.error || '未知錯誤'}`);
+      }
+    } catch {
+      alert('上傳失敗：無法連線到伺服器');
+    }
+  }, [prompt, tablePrompt, model, batchSize, skipLastPages, brokerSkipMap, fileListWidth, leftWidth, rightWidth]);
 
   // === 切換活躍檔案 ===
   const handleSelectFile = useCallback((fileId: string) => {
@@ -566,6 +616,7 @@ export default function PDFExtractApp() {
           brokerSkipMap={brokerSkipMap}
           onBrokerSkipMapChange={setBrokerSkipMap}
           activeFileStatus={activeFile?.status}
+          onUploadSettings={handleUploadSettings}
         />
       </div>
 

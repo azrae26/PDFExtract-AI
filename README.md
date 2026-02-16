@@ -12,6 +12,7 @@
 - **Hover 互動**：左側文字與中間框互相連動高亮
 - **自訂 Prompt**：右側可編輯 Prompt，修改後按「重新分析」即可重跑
 - **狀態持久化**：檔案列表和分析結果自動存入 IndexedDB，重新整理後完整恢復
+- **設定同步**：一鍵上傳設定到伺服器，其他人開啟時自動套用共享設定
 
 ## 技術棧
 
@@ -33,6 +34,7 @@ src/
     layout.tsx                — 根佈局
     globals.css               — 全域樣式
     api/analyze/route.ts      — Gemini API 端點（Server Side）
+    api/settings/route.ts     — 設定同步 API（GET 讀取 / POST 寫入共享設定）
   components/
     PDFExtractApp.tsx         — 主應用元件（全域狀態管理、四欄佈局、全域分析 toggle）
     FileListPanel.tsx         — 最左面板：檔案列表、全域分析控制（暫停/繼續/全部重新分析）
@@ -64,10 +66,11 @@ npm install
 
 ### 2. 設定環境變數
 
-編輯 `.env.local`，填入你的 Gemini API Key：
+編輯 `.env.local`，填入你的 Gemini API Key 和設定同步密碼：
 
 ```
 GEMINI_API_KEY=你的_GEMINI_API_KEY
+SETTINGS_PASSWORD=你的上傳密碼
 ```
 
 ### 3. 啟動開發伺服器
@@ -116,6 +119,23 @@ npx tsx debug-pdf.ts batch [dir] [page]
 ```
 
 檔名支援 glob 模式（如 `5274*`），解決 PowerShell 中文編碼問題。
+
+## 設定同步（上傳到伺服器）
+
+左側面板底部有「上傳設定到伺服器」按鈕，可將當前所有設定（Prompt、模型、批次大小、券商忽略頁數、面板寬度等）上傳到伺服器。其他人開啟網頁時會自動載入伺服器上的設定。
+
+**環境變數**：
+
+| 變數 | 說明 | 預設值 |
+|------|------|--------|
+| `SETTINGS_PASSWORD` | 上傳設定所需的密碼（必填才能啟用上傳） | 無 |
+| `SETTINGS_DIR` | 設定檔案存放目錄 | `./data` |
+
+**Railway 部署**：
+
+1. 新增 persistent volume，掛載到 `/data`
+2. 設定環境變數 `SETTINGS_DIR=/data`
+3. 設定環境變數 `SETTINGS_PASSWORD=你的密碼`
 
 ## 注意事項
 

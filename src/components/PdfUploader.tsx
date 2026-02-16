@@ -53,6 +53,8 @@ interface PdfUploaderProps {
   onBrokerSkipMapChange: (map: Record<string, number>) => void;
   /** 活躍檔案的狀態（用於按鈕判斷：processing/queued→停止分析，其餘→重新分析） */
   activeFileStatus?: FileEntry['status'];
+  /** 上傳當前設定到伺服器 */
+  onUploadSettings: () => void;
 }
 
 export default function PdfUploader({
@@ -80,6 +82,7 @@ export default function PdfUploader({
   brokerSkipMap,
   onBrokerSkipMapChange,
   activeFileStatus,
+  onUploadSettings,
 }: PdfUploaderProps) {
   // API 金鑰 popover 狀態
   const [apiKeyOpen, setApiKeyOpen] = useState(false);
@@ -447,6 +450,15 @@ export default function PdfUploader({
             placeholder="雙擊框框時，截圖該區域送 AI 所用的 Prompt..."
           />
         </div>
+
+        {/* 上傳設定到伺服器 */}
+        <button
+          type="button"
+          onClick={onUploadSettings}
+          className="w-full py-2 text-[13px] font-medium text-white bg-indigo-500 rounded-lg hover:bg-indigo-600 cursor-pointer transition-colors"
+        >
+          上傳設定到伺服器
+        </button>
       </div>
 
       {/* API 金鑰 popover（fixed 定位，避免被父層 overflow 截斷） */}
