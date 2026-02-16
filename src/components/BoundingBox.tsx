@@ -6,7 +6,7 @@
 
 'use client';
 
-import { useRef } from 'react';
+import { useRef, useState, useCallback } from 'react';
 import { Rnd } from 'react-rnd';
 import { Region } from '@/lib/types';
 import { getBoxColor, EMPTY_BOX_COLOR, NORMALIZED_MAX } from '@/lib/constants';
@@ -32,6 +32,8 @@ interface BoundingBoxProps {
   onDoubleClick: () => void;
   /** 是否顯示校正前的 bbox */
   showOriginalBbox?: boolean;
+  /** 頁碼（debug 用） */
+  pageNumber: number;
 }
 
 /** 歸一化座標 → 像素座標 */
@@ -78,6 +80,7 @@ export default function BoundingBox({
   onRemove,
   onDoubleClick,
   showOriginalBbox,
+  pageNumber,
 }: BoundingBoxProps) {
   const isEmpty = !region.text?.trim();
   const color = isEmpty ? EMPTY_BOX_COLOR : getBoxColor(colorIndex);
@@ -85,6 +88,40 @@ export default function BoundingBox({
   const useOriginal = showOriginalBbox && region.originalBbox;
   const activeBbox = useOriginal ? region.originalBbox! : region.bbox;
   const { x, y, width, height } = normalizedToPixel(activeBbox, displayWidth, displayHeight);
+
+  // Debug 複製狀態
+  const [debugCopied, setDebugCopied] = useState(false);
+  const handleCopyDebug = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    const [x1, y1, x2, y2] = region.bbox;
+    const pixel = normalizedToPixel(region.bbox, displayWidth, displayHeight);
+    const debugInfo: Record<string, unknown> = {
+      page: pageNumber,
+      regionId: region.id,
+      label: region.label,
+      bbox: region.bbox,
+      bboxSize: { w: x2 - x1, h: y2 - y1 },
+      pixelBbox: {
+        x: Math.round(pixel.x),
+        y: Math.round(pixel.y),
+        w: Math.round(pixel.width),
+        h: Math.round(pixel.height),
+      },
+      displaySize: { w: displayWidth, h: Math.round(displayHeight) },
+    };
+    if (region.userModified) {
+      debugInfo.userModified = true;
+    }
+    // 提取流程的完整 debug 資料（各 phase bbox 快照 + hits + 多欄 + 行分組）
+    if (region._debug) {
+      debugInfo.extractionDebug = region._debug;
+    }
+    debugInfo.text = region.text || '';
+    navigator.clipboard.writeText(JSON.stringify(debugInfo, null, 2)).then(() => {
+      setDebugCopied(true);
+      setTimeout(() => setDebugCopied(false), 1500);
+    });
+  }, [region, displayWidth, displayHeight, pageNumber]);
 
   // 雙擊右鍵刪除
   const lastRightClickRef = useRef(0);
@@ -163,6 +200,19 @@ export default function BoundingBox({
           title="移除此框"
         >
           ✕
+        </button>
+
+        {/* Debug 複製按鈕 — X 按鈕下方 */}
+        <button
+          className="absolute top-3.5 -right-2.5 w-5 h-5 rounded-full flex items-center justify-center text-white text-[9px] font-bold opacity-0 hover:opacity-100 group-hover:opacity-60 transition-opacity cursor-pointer z-30"
+          style={{ backgroundColor: debugCopied ? '#22c55e' : '#6b7280' }}
+          onMouseDown={(e) => {
+            e.stopPropagation();
+            handleCopyDebug(e);
+          }}
+          title="複製 debug 參數到剪貼簿"
+        >
+          {debugCopied ? '✓' : '⎘'}
         </button>
 
         {/* 四角 resize 手柄提示 */}

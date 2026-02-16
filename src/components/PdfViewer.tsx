@@ -527,6 +527,7 @@ export default function PdfViewer({
                             onRemove={() => onRegionRemove(pageNum, region.id)}
                             onDoubleClick={() => onRegionDoubleClick(pageNum, region.id)}
                             showOriginalBbox={showOriginalBbox}
+                            pageNumber={pageNum}
                           />
                         );
                       })}

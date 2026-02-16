@@ -81,6 +81,8 @@ export const COLUMN_MIN_WIDTH_RATIO = 0.10;
 export const COLUMN_CUT_GAP_MIN = 5;
 /** 不合理切割行佔比上限——超過此比例的行在分界線位置沒有足夠 gap → 拒絕該候選 */
 export const COLUMN_BAD_CUT_MAX_RATIO = 0.2;
+/** 文字內容比例下限——較少一邊的字元數 / 總字元數 < 此值 → 不是真正的多欄（避免把 bullet list 的 • 誤判為左欄） */
+export const COLUMN_MIN_CHAR_RATIO = 0.05;
 
 // === PUA 字元替換映射 ===
 // PDF 常用 Wingdings/Symbol 等自訂字型，文字層存為 Private Use Area (U+E000-U+F8FF) 字元
@@ -97,6 +99,36 @@ export const PUA_CHAR_MAP: Record<number, string> = {
   0xF0FC: '✓',  // Wingdings: 打勾變體
   0xF0E8: '➤',  // Wingdings: 箭頭
 };
+
+// === Wingdings 字型 ASCII → 符號映射 ===
+// PDF 中 Wingdings 字型的字元碼是 ASCII 範圍（0x00-0xFF），不在 PUA 範圍內，
+// pdfjs 解碼後變成普通字母（如 'n' → ■），sanitizePuaChars 無法處理。
+// 需要在知道 fontName 的情況下（pdfTextExtract.ts IO 層），逐字替換。
+export const WINGDINGS_CHAR_MAP: Record<string, string> = {
+  'l': '●',  // 0x6C: 實心圓點
+  'n': '■',  // 0x6E: 實心方塊（常見項目符號）
+  'q': '◆',  // 0x71: 實心菱形
+  'r': '□',  // 0x72: 空心方塊
+  'u': '○',  // 0x75: 空心圓
+  'v': '✓',  // 0x76: 打勾
+  'x': '✕',  // 0x78: 叉號
+  't': '◇',  // 0x74: 空心菱形
+  'w': '✗',  // 0x77: 粗叉號
+  'à': '🖊', // 0xE0: 筆（近似）
+};
+
+/** 偵測 fontName 是否為 Wingdings 系列字型 */
+export function isWingdingsFont(fontName: string): boolean {
+  return /wingdings|webdings|zapfdingbats/i.test(fontName);
+}
+
+/**
+ * 替換 Wingdings 字型中非 PUA 的字元
+ * 只在確認為 Wingdings 字型時呼叫（由 IO 層 pdfTextExtract.ts 判斷 fontName）
+ */
+export function sanitizeWingdings(str: string): string {
+  return str.replace(/./g, (ch) => WINGDINGS_CHAR_MAP[ch] ?? '■');
+}
 
 // === 行內間距常數 ===
 /** 行內欄間距閾值（歸一化單位，約頁面寬度 3%） */
@@ -431,6 +463,13 @@ export function testSeparator(
     if (minRatio < COLUMN_MIN_WIDTH_RATIO) return null; // 某一邊太窄，不是獨立欄
   }
 
+  // 文字內容比例檢查：避免把 bullet list（•）的標記符號誤判為左欄
+  // bullet / 編號等標記字元少、文字量極少，真正的多欄兩邊都有實質文字內容
+  const leftChars = leftHits.reduce((sum, h) => sum + h.str.length, 0);
+  const rightChars = rightHits.reduce((sum, h) => sum + h.str.length, 0);
+  const totalChars = leftChars + rightChars;
+  if (totalChars > 0 && Math.min(leftChars, rightChars) / totalChars < COLUMN_MIN_CHAR_RATIO) return null;
+
   // 斷行合理性檢查：分界線穿過的行，行內在分界位置必須有足夠的 gap
   // 避免把一行連續文字硬切成兩半
   const sortedByBl = [...hits].sort((a, b) => a.normBaseline - b.normBaseline);
@@ -521,7 +560,7 @@ export function testSeparator(
  *
  * @returns 按欄分組的 hits 陣列，單欄時回傳 [hits]
  */
-export function splitIntoColumns(hits: Hit[]): Hit[][] {
+export function splitIntoColumns(hits: Hit[], debug?: ExtractDebugCollector): Hit[][] {
   if (hits.length <= 1) return [hits];
 
   // === Step 1: 按 baseline 分行 ===
@@ -704,6 +743,10 @@ export function splitIntoColumns(hits: Hit[]): Hit[][] {
     console.log(
       `[pdfTextExtract][${_ts()}] 📊 偵測到 2 欄佈局（${bestSource}）：${bestResult.detail}`
     );
+    if (debug) {
+      debug.columnSource = bestSource;
+      debug.columnExclusiveRatio = Math.round(bestResult.exclusiveRatio * 100) / 100;
+    }
     return [bestResult.leftHits, bestResult.rightHits];
   }
 
@@ -719,6 +762,10 @@ export function splitIntoColumns(hits: Hit[]): Hit[][] {
         console.log(
           `[pdfTextExtract][${_ts()}] 📊 偵測到 2 欄佈局（投影法 strict fallback）：${fallbackResult.detail}`
         );
+        if (debug) {
+          debug.columnSource = '投影法 strict fallback';
+          debug.columnExclusiveRatio = Math.round(fallbackResult.exclusiveRatio * 100) / 100;
+        }
         return [fallbackResult.leftHits, fallbackResult.rightHits];
       }
     }
@@ -736,14 +783,42 @@ export function splitIntoColumns(hits: Hit[]): Hit[][] {
 // ============================================================
 
 /**
+ * extractTextFromBbox 的 debug 資料收集器
+ * 由呼叫端（pdfTextExtract.ts）建立並傳入，extract 完成後包含所有中間參數
+ */
+export interface ExtractDebugCollector {
+  /** 落入 bbox 的 Hit 列表 */
+  hits: { str: string; x: number; y: number; right: number; baseline: number }[];
+  /** 偵測到的欄數 */
+  columns: number;
+  /** 多欄分界線位置 */
+  columnSeparator?: number;
+  /** 獨有行比例 */
+  columnExclusiveRatio?: number;
+  /** 多欄偵測來源 */
+  columnSource?: string;
+  /** 行數 */
+  lineCount: number;
+  /** 實際分行閾值 */
+  lineThreshold: number;
+  /** 是否自適應 */
+  adaptiveThreshold: boolean;
+  /** 各行距 */
+  lineGaps: number[];
+  /** 行距中位數 */
+  medianLineGap: number;
+}
+
+/**
  * 把一組 hits 按閱讀順序排序並拼接成文字
  * 排序：先按 baseline 分行（聚類），再行內按 X（左→右）
  * ⚠️ 不能直接用帶 threshold 的 comparator sort（不可傳遞性問題）：
  *    超連結等異字型的 baseline 微偏，使相鄰行 items 被混為同行後按 X 排序導致交錯
  * 同一行內若偵測到明顯水平間距（表格不同欄），自動插入 TAB
  * 行距突然變大時（段落間距 > 正常行距 × 1.4）自動插入空行
+ * @param debug 可選 debug 收集器 — 傳入時會寫入行分組相關資訊
  */
-export function formatColumnText(hits: Hit[]): string {
+export function formatColumnText(hits: Hit[], debug?: ExtractDebugCollector): string {
   if (hits.length === 0) return '';
 
   // === Step 1: 按 baseline 排序 ===
@@ -930,6 +1005,15 @@ export function formatColumnText(hits: Hit[]): string {
     );
   }
 
+  // === 寫入 debug 收集器 ===
+  if (debug) {
+    debug.lineCount = lines.length;
+    debug.lineThreshold = lineThreshold;
+    debug.adaptiveThreshold = lineThreshold !== SAME_LINE_THRESHOLD;
+    debug.lineGaps = lineGaps.map(g => Math.round(g * 10) / 10);
+    debug.medianLineGap = Math.round(medianLineGap * 10) / 10;
+  }
+
   // === Step 5: 逐行拼接文字 ===
   // 行間：行距 > 局部基本行距 × PARA_GAP_RATIO → 空行（段落分隔），否則換行
   // 行內：間距 > COL_GAP_THRESHOLD → TAB，> SPACE_GAP_THRESHOLD → 空格
@@ -987,10 +1071,12 @@ export function formatColumnText(hits: Hit[]): string {
 /**
  * 從指定 bbox 中提取文字（收集交集文字項 + 多欄偵測 + 按閱讀順序拼接）
  * 若偵測到多欄佈局，先提取左欄全部文字、再提取右欄，避免左右混合
+ * @param debug 可選 debug 收集器 — 傳入時會寫入 hits、多欄偵測、行分組等中間資料
  */
 export function extractTextFromBbox(
   bbox: [number, number, number, number],
   textItems: NormTextItem[],
+  debug?: ExtractDebugCollector,
 ): string {
   const [x1, y1, x2, y2] = bbox;
 
@@ -1014,14 +1100,36 @@ export function extractTextFromBbox(
     );
   }
 
+  // 寫入 debug 收集器：hits 資料
+  if (debug) {
+    debug.hits = hits.map(h => ({
+      str: h.str,
+      x: Math.round(h.normX),
+      y: Math.round(h.normY),
+      right: Math.round(h.normRight),
+      baseline: Math.round(h.normBaseline),
+    }));
+  }
+
   // 偵測多欄佈局
-  const columns = splitIntoColumns(hits);
+  const columns = splitIntoColumns(hits, debug);
+
+  // 寫入 debug 收集器：多欄偵測結果
+  if (debug) {
+    debug.columns = columns.length;
+    // 多欄時記錄分界線（取左欄右邊緣和右欄左邊緣的中點）
+    if (columns.length > 1 && !debug.columnSeparator) {
+      const leftMaxX = Math.max(...columns[0].map(h => h.normRight));
+      const rightMinX = Math.min(...columns[1].map(h => h.normX));
+      debug.columnSeparator = Math.round((leftMaxX + rightMinX) / 2);
+    }
+  }
 
   if (columns.length <= 1) {
     // 單欄：直接排序拼接
-    return formatColumnText(hits);
+    return formatColumnText(hits, debug);
   }
 
-  // 多欄：每欄獨立提取，欄間空一行分隔
-  return columns.map(col => formatColumnText(col)).join('\n\n');
+  // 多欄：每欄獨立提取，欄間空一行分隔（debug 只寫入第一欄的行分組資訊）
+  return columns.map((col, ci) => formatColumnText(col, ci === 0 ? debug : undefined)).join('\n\n');
 }

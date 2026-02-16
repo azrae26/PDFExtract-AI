@@ -195,7 +195,7 @@ export default function PDFExtractApp() {
           if (regions) {
             const updatedRegions = regions.map((r) =>
               // 若正在 AI 識別中（text 以 ⏳ 開頭），不覆蓋
-              r.id === regionId && !r.text?.startsWith('⏳') ? { ...r, text: extracted.text } : r
+              r.id === regionId && !r.text?.startsWith('⏳') ? { ...r, text: extracted.text, _debug: extracted._debug } : r
             );
             updated.set(page, updatedRegions);
           }
@@ -287,7 +287,7 @@ export default function PDFExtractApp() {
           const regions = updated.get(page);
           if (regions) {
             updated.set(page, regions.map((r) =>
-              r.id === newId ? { ...r, text: extracted.text } : r
+              r.id === newId ? { ...r, text: extracted.text, _debug: extracted._debug } : r
             ));
           }
           return updated;
