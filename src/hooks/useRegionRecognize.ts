@@ -9,11 +9,12 @@
  * - 由呼叫端傳入完整 region 物件 + fileId，不依賴共用 state
  */
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef } from 'react';
 import { pdfjs } from 'react-pdf';
 import { Region } from '@/lib/types';
 import {
   FileRegionsUpdater,
+  FileProgressUpdater,
   cropRegionToBase64,
   recognizeRegionWithRetry,
 } from './analysisHelpers';
@@ -22,6 +23,8 @@ interface UseRegionRecognizeOptions {
   pdfDocRef: React.MutableRefObject<pdfjs.PDFDocumentProxy | null>;
   /** 直接更新 files 陣列中指定檔案的 pageRegions */
   updateFileRegions: FileRegionsUpdater;
+  /** 更新指定檔案的 per-file 分析進度（含 status 欄位） */
+  updateFileProgress: FileProgressUpdater;
   tablePrompt: string;
   model: string;
 }
@@ -29,11 +32,14 @@ interface UseRegionRecognizeOptions {
 export default function useRegionRecognize({
   pdfDocRef,
   updateFileRegions,
+  updateFileProgress,
   tablePrompt,
   model,
 }: UseRegionRecognizeOptions) {
   // 獨立的識別中狀態（與批次分析的 isAnalyzing 分離）
   const [isRecognizing, setIsRecognizing] = useState(false);
+  // 追蹤 per-file 識別中的數量（多次快速雙擊時，只有最後一個完成才恢復狀態）
+  const recognizeCountRef = useRef<Map<string, number>>(new Map());
 
   // === 雙擊框框 → 截圖該區域 → 送 AI 識別（表格/圖表） ===
   // 由呼叫端傳入完整 region 物件 + fileId，不依賴共用 state
@@ -46,6 +52,11 @@ export default function useRegionRecognize({
       console.log(`[useRegionRecognize][${ts}] 🖱️ Double-click on page ${page} region ${regionId}, capturing...`);
 
       setIsRecognizing(true);
+
+      // 追蹤 per-file 識別中數量 + 設定檔案狀態為 processing（讓列表與設定面板顯示轉圈圈圖示）
+      const prevCount = recognizeCountRef.current.get(targetFileId) || 0;
+      recognizeCountRef.current.set(targetFileId, prevCount + 1);
+      updateFileProgress(targetFileId, { status: 'processing' });
 
       // 立即標記載入中（在截圖裁切前就顯示「識別中...」，避免 crop 期間用戶看不到回饋）
       updateFileRegions(targetFileId, (prev) => {
@@ -111,10 +122,18 @@ export default function useRegionRecognize({
           return updated;
         });
       } finally {
+        // 遞減 per-file 識別中數量，歸零時恢復檔案狀態為 done
+        const cnt = (recognizeCountRef.current.get(targetFileId) || 1) - 1;
+        if (cnt <= 0) {
+          recognizeCountRef.current.delete(targetFileId);
+          updateFileProgress(targetFileId, { status: 'done' });
+        } else {
+          recognizeCountRef.current.set(targetFileId, cnt);
+        }
         setIsRecognizing(false);
       }
     },
-    [pdfDocRef, tablePrompt, model, updateFileRegions]
+    [pdfDocRef, tablePrompt, model, updateFileRegions, updateFileProgress]
   );
 
   return {

@@ -78,5 +78,5 @@ export const NORMALIZED_MAX = 1000;
 /** 轉圖片的 scale（2x 以獲得較好解析度） */
 export const RENDER_SCALE = 2;
 
-/** JPEG 壓縮品質 */
-export const JPEG_QUALITY = 0.85;
+/** JPEG 壓縮品質（0.55 兼顧清晰度與 token 節省，比 0.85 省約 37%） */
+export const JPEG_QUALITY = 0.55;

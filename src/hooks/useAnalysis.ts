@@ -1,7 +1,7 @@
 /**
  * 功能：PDF 頁面分析核心邏輯 Custom Hook
- * 職責：跨檔案 worker pool 並行分析、單頁重送（支援多頁累加計數）、佇列頁面取消、per-file 停止（不影響 pool）、per-file analyzingPagesMap、整合雙擊識別、券商校正後動態恢復被省略頁面
- * 依賴：react、pdfjs、types、analysisHelpers、useRegionRecognize
+ * 職責：跨檔案 worker pool 並行分析、空文字 region 自動 AI 識別（統一隊列）、單頁重送、佇列頁面取消、per-file 停止（不影響 pool）、per-file analyzingPagesMap、整合雙擊識別、券商校正後動態恢復被省略頁面
+ * 依賴：react、pdfjs、types、analysisHelpers（含 cropRegionToBase64/recognizeRegionWithRetry）、useRegionRecognize
  *
  * 重要設計：
  * - 所有非同步操作都傳入 pdfDoc 快照 + sessionId，避免切換檔案後存取已銷毀的 PDF document
@@ -11,6 +11,8 @@
  * - queuedPagesMap（per-file）追蹤排隊中的頁碼，skippedPagesRef（per-file）記錄被使用者取消的頁碼
  * - analyzeAllPages 支援 getNextFile callback，worker 在 task queue 耗盡時自動拉入下一個排隊檔案
  * - initialSkipRef（per-file）記錄分析啟動時的 effectiveSkip，addPagesToQueueRef 支援券商校正後動態插入頁面
+ * - 統一隊列：空文字 region 的識別任務統一插入 worker pool 的 taskQueue 前端（插隊），與頁面分析共用 batchSize 並行度
+ * - addRecognizeTasksRef：pool 跑中時，handleReanalyzePage 的識別任務也注入同一隊列；pool 沒跑時用分批 Promise.all（此時只有它在呼叫 API，batchSize 自然有效）
  * - 雙擊區域識別委託給 useRegionRecognize hook，isAnalyzing 合併兩者狀態
  */
 
@@ -23,6 +25,8 @@ import {
   FileProgressUpdater,
   analyzePageWithRetry,
   mergePageResult,
+  cropRegionToBase64,
+  recognizeRegionWithRetry,
 } from './analysisHelpers';
 import useRegionRecognize from './useRegionRecognize';
 
@@ -63,6 +67,8 @@ export default function useAnalysis({
   const initialSkipRef = useRef<Map<string, number>>(new Map());
   // 動態插入頁面到 worker pool 的 taskQueue（由 analyzeAllPages closure 內設定，外部透過此 ref 呼叫）
   const addPagesToQueueRef = useRef<((fileId: string, pageNums: number[]) => void) | null>(null);
+  // 動態插入識別任務到 worker pool 的 taskQueue（pool 跑中時，handleReanalyzePage 的識別任務注入同一隊列）
+  const addRecognizeTasksRef = useRef<((fileId: string, pageNum: number, regions: Region[], pdfDoc: pdfjs.PDFDocumentProxy) => void) | null>(null);
 
   // 用來在分析被中斷時標記
   const abortRef = useRef(false);
@@ -110,6 +116,7 @@ export default function useAnalysis({
   const { handleRegionDoubleClick, isRecognizing } = useRegionRecognize({
     pdfDocRef,
     updateFileRegions,
+    updateFileProgress,
     tablePrompt,
     model,
   });
@@ -125,6 +132,7 @@ export default function useAnalysis({
       totalPages: number,
       promptText: string,
       modelId: string,
+      tablePromptText: string,
       concurrency: number,
       targetFileId: string,
       fileUrl: string,
@@ -167,7 +175,8 @@ export default function useAnalysis({
       }
 
       // === 跨檔案 worker pool 資料結構 ===
-      const taskQueue: { fileId: string; pageNum: number }[] = [];
+      // recognizeRegion 有值 = 區域識別任務（插隊到 queue 前端，與頁面分析共用 worker pool）
+      const taskQueue: { fileId: string; pageNum: number; recognizeRegion?: Region }[] = [];
       const pdfDocMap = new Map<string, pdfjs.PDFDocumentProxy>();
       const totalPerFile = new Map<string, number>();
       const completedPerFile = new Map<string, number>();
@@ -281,6 +290,33 @@ export default function useAnalysis({
 
         const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
         console.log(`[useAnalysis][${ts}] ➕ Dynamically added pages [${pageNums.join(', ')}] to queue for file ${fileId}`);
+      };
+
+      // === 動態注入識別任務到 worker pool（handleReanalyzePage 用）===
+      addRecognizeTasksRef.current = (fileId: string, pageNum: number, regions: Region[], pdfDoc: pdfjs.PDFDocumentProxy) => {
+        if (!isSessionValid(sessionId)) return;
+
+        // 確保 pdfDoc 可用（檔案可能已被 pool 標為完成並銷毀 pdfDocMap 中的 doc）
+        if (!pdfDocMap.has(fileId)) {
+          pdfDocMap.set(fileId, pdfDoc);
+        }
+
+        // 允許 handleFileDone 再次觸發（檔案可能先前已被標為完成）
+        fileCompletedSet.delete(fileId);
+
+        // 插入識別任務到 queue 前端（插隊）
+        const recognizeTasks = regions.map((r) => ({ fileId, pageNum, recognizeRegion: r }));
+        taskQueue.unshift(...recognizeTasks);
+
+        // 更新計數
+        globalTotal += recognizeTasks.length;
+        const ft = totalPerFile.get(fileId) || 0;
+        totalPerFile.set(fileId, ft + recognizeTasks.length);
+        setAnalysisProgress({ current: globalCompleted, total: globalTotal });
+        updateFileProgress(fileId, { analysisDelta: recognizeTasks.length, status: 'processing' });
+
+        const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
+        console.log(`[useAnalysis][${ts}] 🔍 Injected ${recognizeTasks.length} recognize task(s) for page ${pageNum} into pool queue (file=${fileId})`);
       };
 
       // === 單個檔案完成處理 ===
@@ -410,13 +446,88 @@ export default function useAnalysis({
         return pendingFetch;
       };
 
-      // === 處理單頁 ===
-      const processPage = async (task: { fileId: string; pageNum: number }) => {
+      // bbox 比對（歸一化整數座標，精確匹配）— processTask 的分析/識別分支共用
+      const bboxEq = (a: number[], b: number[]) =>
+        a[0] === b[0] && a[1] === b[1] && a[2] === b[2] && a[3] === b[3];
+
+      // === 處理單一任務（頁面分析 或 區域識別）===
+      const processTask = async (task: { fileId: string; pageNum: number; recognizeRegion?: Region }) => {
         const { fileId, pageNum } = task;
         if (!isSessionValid(sessionId)) return;
 
         const pdfDoc = pdfDocMap.get(fileId);
         if (!pdfDoc) return;
+
+        // ====== 區域識別任務（空文字 region 自動 AI 識別）======
+        if (task.recognizeRegion) {
+          const region = task.recognizeRegion;
+          const regionBbox = region.bbox;
+
+          // 標記為識別中（用 bbox 比對）
+          updateFileRegions(fileId, (prev) => {
+            const updated = new Map(prev);
+            const rs = updated.get(pageNum);
+            if (rs) {
+              updated.set(pageNum, rs.map((r) =>
+                bboxEq(r.bbox, regionBbox) && !r.userModified ? { ...r, text: '⏳ AI 識別中...' } : r
+              ));
+            }
+            return updated;
+          });
+
+          try {
+            // 裁切 + 送 AI 識別（每個任務獨立渲染頁面，允許並行）
+            const { base64, width, height, sizeKB } = await cropRegionToBase64(pdfDoc, pageNum, region);
+            const arTs = new Date().toLocaleTimeString('en-US', { hour12: false });
+            console.log(`[useAnalysis][${arTs}] 📐 Auto-recognize region bbox=[${regionBbox}]: ${width}x${height}px, ${sizeKB} KB`);
+
+            const recognizeResult = await recognizeRegionWithRetry(base64, tablePromptText, modelId, pageNum, region.id);
+
+            if (!isSessionValid(sessionId)) return;
+
+            if (recognizeResult.success && recognizeResult.text) {
+              updateFileRegions(fileId, (prev) => {
+                const updated = new Map(prev);
+                const rs = updated.get(pageNum);
+                if (rs) {
+                  updated.set(pageNum, rs.map((r) =>
+                    bboxEq(r.bbox, regionBbox) && !r.userModified ? { ...r, text: recognizeResult.text!, userModified: true } : r
+                  ));
+                }
+                return updated;
+              });
+              const arTs2 = new Date().toLocaleTimeString('en-US', { hour12: false });
+              console.log(`[useAnalysis][${arTs2}] ✅ Auto-recognized region bbox=[${regionBbox}]: ${recognizeResult.text!.length} chars`);
+            } else {
+              updateFileRegions(fileId, (prev) => {
+                const updated = new Map(prev);
+                const rs = updated.get(pageNum);
+                if (rs) {
+                  updated.set(pageNum, rs.map((r) =>
+                    bboxEq(r.bbox, regionBbox) && !r.userModified ? { ...r, text: `❌ 識別失敗: ${recognizeResult.error}` } : r
+                  ));
+                }
+                return updated;
+              });
+            }
+          } catch (e) {
+            if (isSessionValid(sessionId)) {
+              console.warn(`[useAnalysis] ⚠️ Auto-recognize failed for page ${pageNum} region bbox=[${regionBbox}]:`, e);
+            }
+          }
+
+          // 識別完成：更新進度 + 檢查檔案完成
+          if (!isSessionValid(sessionId)) return;
+          globalCompleted++;
+          const fileDone = (completedPerFile.get(fileId) || 0) + 1;
+          completedPerFile.set(fileId, fileDone);
+          setAnalysisProgress({ current: globalCompleted, total: globalTotal });
+          updateFileProgress(fileId, { completedDelta: 1 });
+          if (fileDone >= (totalPerFile.get(fileId) || 0)) handleFileDone(fileId);
+          return;
+        }
+
+        // ====== 頁面分析任務（原有邏輯）======
 
         // 檢查是否被使用者取消（或券商忽略末尾頁數）
         // 被跳過的頁面：減少 total 而非增加 completed（不假裝已完成）
@@ -454,19 +565,34 @@ export default function useAnalysis({
 
         if (!isSessionValid(sessionId)) return;
 
+        if (result) {
+          const emptyRegions = await mergePageResult(pageNum, result, pdfDoc, sessionId, isSessionValid, fileId, updateFileRegions, updateFileReport);
+
+          // === 空文字 region → 插入識別任務到 queue 前端（插隊，與頁面分析並行處理）===
+          if (emptyRegions.length > 0 && isSessionValid(sessionId)) {
+            const recognizeTasks = emptyRegions.map((r) => ({ fileId, pageNum, recognizeRegion: r }));
+            taskQueue.unshift(...recognizeTasks);
+
+            // 更新計數（識別任務也計入進度，檔案完成前須全部跑完）
+            globalTotal += recognizeTasks.length;
+            const ft = totalPerFile.get(fileId) || 0;
+            totalPerFile.set(fileId, ft + recognizeTasks.length);
+            updateFileProgress(fileId, { analysisDelta: recognizeTasks.length });
+
+            const arTs = new Date().toLocaleTimeString('en-US', { hour12: false });
+            console.log(`[useAnalysis][${arTs}] 🔍 Queued ${recognizeTasks.length} auto-recognize task(s) for page ${pageNum} (file=${fileId}), inserted at queue front`);
+          }
+        }
+
+        // 頁面分析完成計數（必須在 mergePageResult + 識別任務排隊之後，
+        // 避免多 worker 競態：Worker B 的 fileDone check 跑在 Worker A 的 totalPerFile 更新之前）
         globalCompleted++;
         const fileDone = (completedPerFile.get(fileId) || 0) + 1;
         completedPerFile.set(fileId, fileDone);
         setAnalysisProgress({ current: globalCompleted, total: globalTotal });
-
-        // 更新 per-file 已完成頁數
         updateFileProgress(fileId, { completedDelta: 1 });
 
-        if (result) {
-          await mergePageResult(pageNum, result, pdfDoc, sessionId, isSessionValid, fileId, updateFileRegions, updateFileReport);
-        }
-
-        // 檢查此檔案是否全部完成
+        // 檢查此檔案是否全部完成（此時 totalPerFile 已包含識別任務數量）
         if (fileDone >= (totalPerFile.get(fileId) || 0)) handleFileDone(fileId);
       };
 
@@ -487,7 +613,7 @@ export default function useAnalysis({
           }
 
           const task = taskQueue.shift()!;
-          await processPage(task);
+          await processTask(task);
         }
       };
 
@@ -500,6 +626,7 @@ export default function useAnalysis({
 
       // 清理動態插入 ref（pool 已結束，無法再插入）
       addPagesToQueueRef.current = null;
+      addRecognizeTasksRef.current = null;
 
       // 只有 session 仍有效時才設定完成狀態（否則可能覆蓋新 session 的狀態）
       // 注意：不在這裡清除 analysisFileIdRef，由 PDFExtractApp 的 completion effect 讀取後清除
@@ -520,6 +647,7 @@ export default function useAnalysis({
     analysisSessionRef.current++; // 讓飛行中操作全部失效
     analysisFileIdRef.current = null;
     addPagesToQueueRef.current = null;
+    addRecognizeTasksRef.current = null;
     setBatchIsAnalyzing(false);
     setAnalyzingPagesMap(new Map());
     setQueuedPagesMap(new Map());
@@ -535,6 +663,7 @@ export default function useAnalysis({
     analysisSessionRef.current++;
     inFlightPageRef.current = 0;
     addPagesToQueueRef.current = null;
+    addRecognizeTasksRef.current = null;
     setBatchIsAnalyzing(false);
     setAnalysisProgress({ current: 0, total: 0 });
     setAnalyzingPagesMap(new Map());
@@ -595,10 +724,10 @@ export default function useAnalysis({
     (numPages: number, targetFileId: string, fileUrl: string) => {
       if (numPages > 0 && fileUrl) {
         updateFileRegions(targetFileId, () => new Map());
-        analyzeAllPages(numPages, prompt, model, batchSize, targetFileId, fileUrl);
+        analyzeAllPages(numPages, prompt, model, tablePrompt, batchSize, targetFileId, fileUrl);
       }
     },
-    [prompt, model, batchSize, analyzeAllPages, updateFileRegions]
+    [prompt, model, tablePrompt, batchSize, analyzeAllPages, updateFileRegions]
   );
 
   // === 重新分析單頁（修正：支援多頁同時重送，計數會累加而非覆蓋）===
@@ -655,6 +784,8 @@ export default function useAnalysis({
       // 累加進度，而非覆蓋
       inFlightPageRef.current++;
       setBatchIsAnalyzing(true);
+      // 設定檔案狀態為 processing（讓列表與設定面板顯示轉圈圈圖示）
+      updateFileProgress(targetFileId, { status: 'processing' });
       setAnalysisProgress((prev) => ({
         current: prev.current,
         total: prev.total + 1,
@@ -675,8 +806,110 @@ export default function useAnalysis({
       // 分析完成，移除標記（per-file）
       removeAnalyzingPage(targetFileId, pageNum);
 
+      // 追蹤是否把識別任務注入到 pool（注入後由 pool 負責設回 done，這裡不設）
+      let injectedToPool = false;
+
       if (result && isSessionValid(sessionId)) {
-        await mergePageResult(pageNum, result, pdfDoc, sessionId, isSessionValid, targetFileId, updateFileRegions, updateFileReport);
+        const emptyRegions = await mergePageResult(pageNum, result, pdfDoc, sessionId, isSessionValid, targetFileId, updateFileRegions, updateFileReport);
+
+        // === 空文字 region → 識別任務進入隊列 ===
+        if (emptyRegions.length > 0 && isSessionValid(sessionId)) {
+          // bbox 比對
+          const bboxEq2 = (a: number[], b: number[]) =>
+            a[0] === b[0] && a[1] === b[1] && a[2] === b[2] && a[3] === b[3];
+
+          // 先全部標為「AI 識別中」
+          updateFileRegions(targetFileId, (prev) => {
+            const updated = new Map(prev);
+            const rs = updated.get(pageNum);
+            if (rs) {
+              const emptyBboxes = emptyRegions.map((r) => r.bbox);
+              updated.set(pageNum, rs.map((r) => {
+                if (!r.userModified && emptyBboxes.some((b) => bboxEq2(r.bbox, b))) {
+                  return { ...r, text: '⏳ AI 識別中...' };
+                }
+                return r;
+              }));
+            }
+            return updated;
+          });
+
+          if (addRecognizeTasksRef.current) {
+            // === Pool 在跑：注入到同一個 taskQueue，共用 batchSize 並行度 ===
+            // 注入後由 pool 的 handleFileDone → handlePoolFileComplete 負責設回 done
+            injectedToPool = true;
+            const arTs = new Date().toLocaleTimeString('en-US', { hour12: false });
+            console.log(`[useAnalysis][${arTs}] 🔍 Injecting ${emptyRegions.length} recognize task(s) from re-analyzed page ${pageNum} into pool queue`);
+            addRecognizeTasksRef.current(targetFileId, pageNum, emptyRegions, pdfDoc);
+          } else {
+            // === Pool 沒在跑：用分批 Promise.all（此時只有這裡在呼叫 API，batchSize 自然有效）===
+            const arTs = new Date().toLocaleTimeString('en-US', { hour12: false });
+            console.log(`[useAnalysis][${arTs}] 🔍 Auto-recognizing ${emptyRegions.length} empty region(s) on re-analyzed page ${pageNum} (batch=${batchSize})...`);
+
+            // 累加進度（識別任務計入總數）
+            const recCount = emptyRegions.length;
+            inFlightPageRef.current += recCount;
+            setAnalysisProgress((prev) => ({ current: prev.current, total: prev.total + recCount }));
+            updateFileProgress(targetFileId, { analysisDelta: recCount });
+
+            // 單個識別任務
+            const processRecognition = async (region: Region) => {
+              if (!isSessionValid(sessionId)) return;
+              const regionBbox = region.bbox;
+
+              try {
+                const { base64, width, height, sizeKB } = await cropRegionToBase64(pdfDoc, pageNum, region);
+                const arTs2 = new Date().toLocaleTimeString('en-US', { hour12: false });
+                console.log(`[useAnalysis][${arTs2}] 📐 Auto-recognize region bbox=[${regionBbox}]: ${width}x${height}px, ${sizeKB} KB`);
+
+                const recognizeResult = await recognizeRegionWithRetry(base64, tablePrompt, model, pageNum, region.id);
+
+                if (!isSessionValid(sessionId)) return;
+
+                if (recognizeResult.success && recognizeResult.text) {
+                  updateFileRegions(targetFileId, (prev) => {
+                    const updated = new Map(prev);
+                    const rs = updated.get(pageNum);
+                    if (rs) {
+                      updated.set(pageNum, rs.map((r) =>
+                        bboxEq2(r.bbox, regionBbox) && !r.userModified ? { ...r, text: recognizeResult.text!, userModified: true } : r
+                      ));
+                    }
+                    return updated;
+                  });
+                  const arTs3 = new Date().toLocaleTimeString('en-US', { hour12: false });
+                  console.log(`[useAnalysis][${arTs3}] ✅ Auto-recognized region bbox=[${regionBbox}]: ${recognizeResult.text!.length} chars`);
+                } else {
+                  updateFileRegions(targetFileId, (prev) => {
+                    const updated = new Map(prev);
+                    const rs = updated.get(pageNum);
+                    if (rs) {
+                      updated.set(pageNum, rs.map((r) =>
+                        bboxEq2(r.bbox, regionBbox) && !r.userModified ? { ...r, text: `❌ 識別失敗: ${recognizeResult.error}` } : r
+                      ));
+                    }
+                    return updated;
+                  });
+                }
+              } catch (e) {
+                if (isSessionValid(sessionId)) {
+                  console.warn(`[useAnalysis] ⚠️ Auto-recognize failed for page ${pageNum} region bbox=[${regionBbox}]:`, e);
+                }
+              } finally {
+                setAnalysisProgress((prev) => ({ ...prev, current: prev.current + 1 }));
+                updateFileProgress(targetFileId, { completedDelta: 1 });
+                inFlightPageRef.current--;
+              }
+            };
+
+            // 分批並行：每批最多 batchSize 個
+            for (let i = 0; i < emptyRegions.length; i += batchSize) {
+              if (!isSessionValid(sessionId)) break;
+              const batch = emptyRegions.slice(i, i + batchSize);
+              await Promise.all(batch.map(processRecognition));
+            }
+          }
+        }
       }
 
       // 更新 per-file 已完成頁數（無論是從佇列拉出或獨立重跑，都要同步進度到列表與設定面板）
@@ -688,9 +921,13 @@ export default function useAnalysis({
         setBatchIsAnalyzing(false);
         // 重置進度（避免下次累計混亂）
         setAnalysisProgress({ current: 0, total: 0 });
+        // 設回 done（僅限本地處理完畢；注入 pool 的由 handlePoolFileComplete 負責）
+        if (!injectedToPool) {
+          updateFileProgress(targetFileId, { status: 'done' });
+        }
       }
     },
-    [prompt, model, pdfDocRef, updateFileRegions, updateFileReport, updateFileProgress, isSessionValid, queuedPagesMap, addAnalyzingPage, removeAnalyzingPage]
+    [prompt, model, tablePrompt, batchSize, pdfDocRef, updateFileRegions, updateFileReport, updateFileProgress, isSessionValid, queuedPagesMap, addAnalyzingPage, removeAnalyzingPage]
   );
 
   return {

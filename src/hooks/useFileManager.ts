@@ -215,7 +215,8 @@ export default function useFileManager({
           let cp = update.completedPages !== undefined ? update.completedPages : f.completedPages;
           if (update.analysisDelta) ap += update.analysisDelta;
           if (update.completedDelta) cp += update.completedDelta;
-          return { ...f, analysisPages: ap, completedPages: cp };
+          const newStatus = update.status ?? f.status;
+          return { ...f, analysisPages: ap, completedPages: cp, status: newStatus };
         })
       );
     },
@@ -433,10 +434,10 @@ export default function useFileManager({
         setFiles((prev) =>
           prev.map((f) => (f.id === targetFileId ? { ...f, status: 'processing' as const, analysisPages: 0, completedPages: 0 } : f))
         );
-        analyzeAllPages(numPagesToAnalyze, prompt, model, batchSize, targetFileId, fileUrl, getNextFileForPool, handlePoolFileComplete);
+        analyzeAllPages(numPagesToAnalyze, prompt, model, tablePrompt, batchSize, targetFileId, fileUrl, getNextFileForPool, handlePoolFileComplete);
       }
     },
-    [isAnalyzing, prompt, model, batchSize, analyzeAllPages, updateFileRegions, updateFileProgress, stopSingleFile, getNextFileForPool, handlePoolFileComplete]
+    [isAnalyzing, prompt, model, tablePrompt, batchSize, analyzeAllPages, updateFileRegions, updateFileProgress, stopSingleFile, getNextFileForPool, handlePoolFileComplete]
   );
 
   // === 切換檔案時：清理 pdfDocRef，條件性中斷 session ===
@@ -627,10 +628,10 @@ export default function useFileManager({
       const completedPages = buildCompletedPages(nextQueued, pagesToAnalyze);
       const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
       console.log(`[useFileManager][${ts}] 🚀 PDF already cached, starting analysis directly for ${nextQueued.id} (${completedPages?.size || 0} pages already done)`);
-      analyzeAllPages(pagesToAnalyze, prompt, model, batchSize, nextQueued.id, nextQueued.url, getNextFileForPool, handlePoolFileComplete, effectiveSkip2, completedPages);
+      analyzeAllPages(pagesToAnalyze, prompt, model, tablePrompt, batchSize, nextQueued.id, nextQueued.url, getNextFileForPool, handlePoolFileComplete, effectiveSkip2, completedPages);
     }
     // else: PdfViewer 尚未載入，等 handleDocumentLoadForFile 觸發
-  }, [skipLastPages, prompt, model, batchSize, analyzeAllPages, getNextFileForPool, handlePoolFileComplete]);
+  }, [skipLastPages, prompt, model, tablePrompt, batchSize, analyzeAllPages, getNextFileForPool, handlePoolFileComplete]);
 
   // === 觸發佇列處理（供外部呼叫，如「繼續分析」「全部重新分析」後啟動佇列）===
   const triggerQueueProcessing = useCallback(() => {
@@ -767,10 +768,10 @@ export default function useFileManager({
             completedPages.add(pageNum);
           }
         });
-        analyzeAllPages(pagesToAnalyze, prompt, model, batchSize, fileId, currentFile.url, getNextFileForPool, handlePoolFileComplete, effectiveSkipDoc, completedPages.size > 0 ? completedPages : undefined);
+        analyzeAllPages(pagesToAnalyze, prompt, model, tablePrompt, batchSize, fileId, currentFile.url, getNextFileForPool, handlePoolFileComplete, effectiveSkipDoc, completedPages.size > 0 ? completedPages : undefined);
       }
     },
-    [prompt, model, batchSize, skipLastPages, analyzeAllPages, getNextFileForPool, handlePoolFileComplete]
+    [prompt, model, tablePrompt, batchSize, skipLastPages, analyzeAllPages, getNextFileForPool, handlePoolFileComplete]
   );
 
   // === 分析完成後，標記殘餘 processing 檔案 + 處理 stopped 狀態 ===

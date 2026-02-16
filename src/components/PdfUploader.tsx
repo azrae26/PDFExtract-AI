@@ -239,7 +239,7 @@ export default function PdfUploader({
             </select>
           </div>
           <div className="w-20 flex-shrink-0">
-            <label className="text-[11px] leading-4 font-medium text-gray-500 mb-1.5 block whitespace-nowrap">並行分析頁數</label>
+            <label className="text-[11px] leading-4 font-medium text-gray-500 mb-1.5 block whitespace-nowrap">並行分析數</label>
             <input
               type="number"
               min={1}

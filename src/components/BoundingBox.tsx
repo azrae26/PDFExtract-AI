@@ -126,6 +126,15 @@ export default function BoundingBox({
     });
   }, [region, displayWidth, displayHeight, pageNumber]);
 
+  // === 按鈕定位：正常往下移 20px；框太小時往右移 15px 並垂直居中 ===
+  const isSmallBox = height < 60;
+  const xBtnStyle: React.CSSProperties = isSmallBox
+    ? { top: height / 2 - 22, right: -25 }
+    : { top: 10, right: -10 };
+  const copyBtnStyle: React.CSSProperties = isSmallBox
+    ? { top: height / 2 + 2, right: -25 }
+    : { top: 34, right: -10 };
+
   // 雙擊右鍵刪除
   const lastRightClickRef = useRef(0);
   const handleContextMenu = (e: React.MouseEvent) => {
@@ -196,10 +205,10 @@ export default function BoundingBox({
           onDoubleClick();
         }}
       >
-        {/* X 刪除按鈕 — 右上角 */}
+        {/* X 刪除按鈕 */}
         <button
-          className="absolute -top-2.5 -right-2.5 w-5 h-5 rounded-full flex items-center justify-center text-white text-xs font-bold opacity-0 hover:opacity-100 group-hover:opacity-80 transition-opacity cursor-pointer z-30"
-          style={{ backgroundColor: color.border }}
+          className="absolute w-5 h-5 rounded-full flex items-center justify-center text-white text-xs font-bold opacity-0 hover:opacity-100 group-hover:opacity-80 transition-opacity cursor-pointer z-30"
+          style={{ ...xBtnStyle, backgroundColor: color.border }}
           onMouseDown={(e) => {
             e.stopPropagation(); // 防止觸發 Rnd 的拖動
             onRemove();
@@ -211,8 +220,8 @@ export default function BoundingBox({
 
         {/* Debug 複製按鈕 — X 按鈕下方 */}
         <button
-          className="absolute top-3.5 -right-2.5 w-5 h-5 rounded-full flex items-center justify-center text-white text-[9px] font-bold opacity-0 hover:opacity-100 group-hover:opacity-60 transition-opacity cursor-pointer z-30"
-          style={{ backgroundColor: debugCopied ? '#22c55e' : '#6b7280' }}
+          className="absolute w-5 h-5 rounded-full flex items-center justify-center text-white text-[9px] font-bold opacity-0 hover:opacity-100 group-hover:opacity-60 transition-opacity cursor-pointer z-30"
+          style={{ ...copyBtnStyle, backgroundColor: debugCopied ? '#22c55e' : '#6b7280' }}
           onMouseDown={(e) => {
             e.stopPropagation();
             handleCopyDebug(e);

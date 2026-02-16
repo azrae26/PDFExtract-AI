@@ -1,6 +1,8 @@
 /**
  * 功能：PDF 分析核心純函式工具模組
- * 職責：PDF 頁面渲染、API 呼叫（含失敗自動重試最多 2 次）、分析結果合併、區域截圖裁切、區域識別 API
+ * 職責：PDF 頁面渲染、API 呼叫（含失敗自動重試最多 2 次）、分析結果合併（回傳空文字 region 清單）、
+ *       頁面 canvas 渲染與區域裁切（renderPageCanvas + cropRegionFromCanvas，支援同頁多 region 複用同一 canvas）、
+ *       區域截圖裁切、區域識別 API
  * 依賴：pdfjs、types、constants、pdfTextExtract
  *
  * 重要設計：
@@ -35,6 +37,7 @@ export type FileProgressUpdater = (
     completedPages?: number;  // 設定已完成頁數（絕對值）
     completedDelta?: number;  // 已完成頁數增減量
     analysisDelta?: number;   // 分析目標頁數增減量
+    status?: 'processing' | 'done' | 'stopped' | 'error'; // 同時更新檔案狀態（可選）
   },
 ) => void;
 
@@ -167,7 +170,9 @@ export async function analyzePageWithRetry(
   return null;
 }
 
-/** 處理單頁分析結果：提取文字 + merge 到 pageRegions + 儲存券商名 */
+/** 處理單頁分析結果：提取文字 + merge 到 pageRegions + 儲存券商名
+ *  回傳空文字 region 清單（含 bbox），供呼叫端決定是否自動 AI 識別
+ *  注意：空 region 的 bbox 用於後續 cropRegionFromCanvas，呼叫端用 bbox 比對來更新 state */
 // 傳入 pdfDoc 快照 + sessionId + targetFileId
 export async function mergePageResult(
   pageNum: number,
@@ -178,7 +183,7 @@ export async function mergePageResult(
   targetFileId: string,
   updateFileRegions: FileRegionsUpdater,
   updateFileReport: FileReportUpdater,
-) {
+): Promise<Region[]> {
   // 儲存券商名（只要有 report 就更新，即使沒有 regions）
   if (result.report) {
     updateFileReport(targetFileId, result.report);
@@ -196,28 +201,28 @@ export async function mergePageResult(
         return updated;
       });
     }
-    return;
+    return [];
   }
-  if (!isSessionValid(sessionId)) return;
+  if (!isSessionValid(sessionId)) return [];
 
   let regionsWithText = result.regions;
   try {
     const pdfPage = await pdfDoc.getPage(pageNum);
-    if (!isSessionValid(sessionId)) return;
+    if (!isSessionValid(sessionId)) return [];
     regionsWithText = await extractTextForRegions(pdfPage, result.regions);
   } catch (e) {
     // document 已銷毀時不要噴錯
-    if (!isSessionValid(sessionId)) return;
+    if (!isSessionValid(sessionId)) return [];
     console.warn(`[analysisHelpers] ⚠️ Text extraction failed for page ${pageNum}`, e);
   }
 
-  if (!isSessionValid(sessionId)) return;
+  if (!isSessionValid(sessionId)) return [];
 
-  // 記錄空文字 region 數量（保留空框，顯示為灰色，不再刪除）
-  const emptyCount = regionsWithText.filter((r) => !r.text.trim()).length;
-  if (emptyCount > 0) {
+  // 在 state updater 之外直接收集空文字 region（React 18 batching 會延遲 updater 執行）
+  const emptyRegions = regionsWithText.filter((r) => !r.text.trim());
+  if (emptyRegions.length > 0) {
     const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
-    console.log(`[analysisHelpers][${ts}] 🔘 Page ${pageNum}: ${emptyCount} empty region(s) kept as gray (${regionsWithText.length} total)`);
+    console.log(`[analysisHelpers][${ts}] 🔘 Page ${pageNum}: ${emptyRegions.length} empty region(s) kept as gray (${regionsWithText.length} total)`);
   }
 
   // Merge：保留 userModified 的 regions，追加 AI 新結果
@@ -235,6 +240,50 @@ export async function mergePageResult(
     return updated;
   };
   updateFileRegions(targetFileId, mergeUpdater);
+  return emptyRegions;
+}
+
+/** 渲染 PDF 頁面到 canvas（不銷毀），供多次裁切複用。呼叫端負責 canvas.remove() */
+export async function renderPageCanvas(
+  pdfDoc: pdfjs.PDFDocumentProxy,
+  page: number,
+): Promise<{ canvas: HTMLCanvasElement; viewport: { width: number; height: number } }> {
+  const pdfPage = await pdfDoc.getPage(page);
+  const viewport = pdfPage.getViewport({ scale: RENDER_SCALE });
+  const canvas = document.createElement('canvas');
+  canvas.width = viewport.width;
+  canvas.height = viewport.height;
+  const ctx = canvas.getContext('2d')!;
+  await pdfPage.render({ canvas, canvasContext: ctx, viewport }).promise;
+  return { canvas, viewport: { width: viewport.width, height: viewport.height } };
+}
+
+/** 從已渲染的 canvas 裁切指定 region 為 base64 JPEG（不銷毀來源 canvas） */
+export function cropRegionFromCanvas(
+  canvas: HTMLCanvasElement,
+  viewport: { width: number; height: number },
+  region: Region,
+): { base64: string; width: number; height: number; sizeKB: number } {
+  const [x1, y1, x2, y2] = region.bbox;
+  const sx = (x1 / NORMALIZED_MAX) * viewport.width;
+  const sy = (y1 / NORMALIZED_MAX) * viewport.height;
+  const sw = ((x2 - x1) / NORMALIZED_MAX) * viewport.width;
+  const sh = ((y2 - y1) / NORMALIZED_MAX) * viewport.height;
+
+  const cropCanvas = document.createElement('canvas');
+  cropCanvas.width = Math.round(sw);
+  cropCanvas.height = Math.round(sh);
+  const cropCtx = cropCanvas.getContext('2d')!;
+  cropCtx.drawImage(canvas, sx, sy, sw, sh, 0, 0, cropCanvas.width, cropCanvas.height);
+
+  const dataUrl = cropCanvas.toDataURL('image/jpeg', JPEG_QUALITY);
+  const base64 = dataUrl.split(',')[1];
+  const sizeKB = Math.round((base64.length * 3) / 4 / 1024);
+  const width = cropCanvas.width;
+  const height = cropCanvas.height;
+
+  cropCanvas.remove();
+  return { base64, width, height, sizeKB };
 }
 
 /** 將 PDF 頁面中的指定區域截圖裁切為 base64 JPEG */

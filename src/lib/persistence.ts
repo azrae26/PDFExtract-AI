@@ -74,10 +74,14 @@ function normalizeStatus(status: FileEntry['status']): SerializedFileEntry['stat
   return status;
 }
 
-/** 序列化單一 Region（剔除 _debug） */
+/** 序列化單一 Region（剔除 _debug、清除暫態文字） */
 function serializeRegion(region: Region): SerializedRegion {
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const { _debug, ...rest } = region;
+  // 清除識別中/識別失敗的暫態文字（F5 後不應殘留）
+  if (rest.text && (rest.text.startsWith('⏳') || rest.text.startsWith('❌'))) {
+    return { ...rest, text: '' };
+  }
   return rest;
 }
 
