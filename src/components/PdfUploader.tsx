@@ -245,7 +245,7 @@ export default function PdfUploader({
               <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" />
             </svg>
             <p className="text-[13px] leading-5 text-amber-700">
-              請先點擊右方 <span className="font-medium">🔑 金鑰按鈕</span> 設定 Gemini API Key
+              請先點擊下方 <span className="font-medium">🔑 金鑰按鈕</span> 設定 Gemini API Key
             </p>
           </div>
         )}
@@ -297,7 +297,7 @@ export default function PdfUploader({
               }`}
               title={apiKey ? 'API 金鑰已設定' : '請設定 API 金鑰'}
             >
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} style={{ transform: 'scaleX(-1)' }}>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 5.25a3 3 0 013 3m3 0a6 6 0 01-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1121.75 8.25z" />
               </svg>
             </button>
@@ -460,6 +460,8 @@ export default function PdfUploader({
           <div className="flex gap-1.5">
             <input
               type="password"
+              autoComplete="off"
+              data-form-type="other"
               value={apiKeyInput}
               onChange={(e) => setApiKeyInput(e.target.value)}
               onKeyDown={(e) => {
