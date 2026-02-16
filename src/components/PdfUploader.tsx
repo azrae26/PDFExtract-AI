@@ -268,7 +268,7 @@ export default function PdfUploader({
               <select
                 value={model}
                 onChange={(e) => onModelChange(e.target.value)}
-                className="w-full appearance-none pl-2.5 pr-7 py-2 text-[14px] leading-5 border border-gray-300 rounded-lg bg-gray-50 text-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent cursor-pointer"
+                className="w-full appearance-none pl-2.5 pr-7 py-1.5 text-[13px] leading-5 border border-gray-300 rounded-lg bg-gray-50 text-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent cursor-pointer"
               >
                 {GEMINI_MODELS.map((m) => (
                   <option key={m.id} value={m.id}>
@@ -293,7 +293,7 @@ export default function PdfUploader({
                 }
                 setApiKeyOpen((p) => !p);
               }}
-              className={`w-[38px] h-[38px] flex items-center justify-center border rounded-lg transition-colors cursor-pointer ${
+              className={`w-[34px] h-[34px] flex items-center justify-center border rounded-lg transition-colors cursor-pointer ${
                 apiKey
                   ? 'border-green-300 bg-green-50 text-green-600 hover:bg-green-100'
                   : 'border-red-300 bg-red-50 text-red-500 hover:bg-red-100'
@@ -316,7 +316,7 @@ export default function PdfUploader({
                 const v = parseInt(e.target.value, 10);
                 if (!isNaN(v) && v >= 1) onBatchSizeChange(Math.min(v, 50));
               }}
-              className="w-full px-2 py-2 text-[14px] leading-5 text-center border border-gray-300 rounded-lg bg-gray-50 text-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              className="w-full pl-4 px-1.5 py-1.5 text-[13px] leading-5 text-center border border-gray-300 rounded-lg bg-gray-50 text-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
             />
           </div>
           <div className="w-[66px] flex-shrink-0">
@@ -330,7 +330,7 @@ export default function PdfUploader({
                 const v = parseInt(e.target.value, 10);
                 if (!isNaN(v) && v >= 0) onSkipLastPagesChange(v);
               }}
-              className="w-full px-2 py-2 text-[14px] leading-5 text-center border border-gray-300 rounded-lg bg-gray-50 text-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              className="w-full pl-4 px-1.5 py-1.5 text-[13px] leading-5 text-center border border-gray-300 rounded-lg bg-gray-50 text-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
             />
           </div>
         </div>
@@ -356,7 +356,7 @@ export default function PdfUploader({
                   }
                 }}
                 placeholder="輸入或選擇券商"
-                className="flex-1 min-w-0 px-2.5 py-2 text-[14px] leading-5 border border-gray-300 rounded-l-lg bg-white text-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                className="flex-1 min-w-0 px-2.5 py-1.5 text-[13px] leading-5 border border-gray-300 rounded-l-lg bg-white text-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
               />
               <button
                 type="button"
@@ -401,7 +401,7 @@ export default function PdfUploader({
               onKeyDown={(e) => { if (e.key === 'Enter' && isNewBroker) handleAddBroker(); }}
               disabled={!brokerInput.trim()}
               placeholder="—"
-              className="w-full px-2 py-2 text-[14px] leading-5 text-center border border-gray-300 rounded-lg bg-white text-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:bg-gray-100 disabled:text-gray-400"
+              className="w-full px-1.5 py-1.5 text-[13px] leading-5 text-center border border-gray-300 rounded-lg bg-white text-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:bg-gray-100 disabled:text-gray-400"
             />
           </div>
           {/* 新增(+) / 刪除(✕) 按鈕 — 依券商是否已存在切換 */}
@@ -409,7 +409,7 @@ export default function PdfUploader({
             <button
               type="button"
               onClick={handleAddBroker}
-              className="w-8 h-[38px] flex items-center justify-center text-blue-500 hover:text-blue-700 hover:bg-blue-50 border border-gray-300 rounded-lg transition-colors cursor-pointer flex-shrink-0"
+              className="w-8 h-[34px] flex items-center justify-center text-blue-500 hover:text-blue-700 hover:bg-blue-50 border border-gray-300 rounded-lg transition-colors cursor-pointer flex-shrink-0"
               title="新增此券商設定"
             >
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
@@ -421,7 +421,7 @@ export default function PdfUploader({
               type="button"
               onClick={handleDeleteBroker}
               disabled={!isExistingBroker}
-              className="w-8 h-[38px] flex items-center justify-center text-gray-400 hover:text-red-500 hover:bg-red-50 border border-gray-300 rounded-lg transition-colors cursor-pointer disabled:text-gray-300 disabled:hover:bg-transparent disabled:cursor-not-allowed flex-shrink-0"
+              className="w-8 h-[34px] flex items-center justify-center text-gray-400 hover:text-red-500 hover:bg-red-50 border border-gray-300 rounded-lg transition-colors cursor-pointer disabled:text-gray-300 disabled:hover:bg-transparent disabled:cursor-not-allowed flex-shrink-0"
               title="刪除此券商設定"
             >
               ✕
@@ -435,7 +435,7 @@ export default function PdfUploader({
           <textarea
             value={prompt}
             onChange={(e) => onPromptChange(e.target.value)}
-            className="w-full h-[330px] p-3 text-[14px] border border-gray-300 rounded-lg resize-y focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-gray-50 text-gray-800 leading-relaxed"
+            className="w-full h-[330px] p-2.5 py-2 text-[13px] border border-gray-300 rounded-lg resize-y focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-gray-50 text-gray-800 leading-relaxed"
             placeholder="輸入分析指令..."
           />
         </div>
@@ -446,7 +446,7 @@ export default function PdfUploader({
           <textarea
             value={tablePrompt}
             onChange={(e) => onTablePromptChange(e.target.value)}
-            className="w-full h-[9rem] p-3 text-[14px] border border-gray-300 rounded-lg resize-y focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-gray-50 text-gray-800 leading-relaxed"
+            className="w-full h-[9rem] p-2.5 py-2 text-[13px] border border-gray-300 rounded-lg resize-y focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-gray-50 text-gray-800 leading-relaxed"
             placeholder="雙擊框框時，截圖該區域送 AI 所用的 Prompt..."
           />
         </div>

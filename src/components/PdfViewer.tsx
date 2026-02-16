@@ -88,6 +88,15 @@ export default function PdfViewer({
   // 每頁右側按鈕群的 ref（用於 scroll 時動態 clamp 位置）
   const btnGroupRefs = useRef<Map<number, HTMLDivElement>>(new Map());
 
+  // 滾動期間禁用 BoundingBox pointer-events（避免 hover 觸發重渲染導致 lag）
+  const scrollIdleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // 包裝 onHover：滾動期間忽略所有 hover 事件（含 pointer-events:none 觸發的 mouseleave）
+  const guardedOnHover = useCallback((regionId: string | null) => {
+    if (scrollRef.current?.dataset.scrolling === '1') return;
+    onHover(regionId);
+  }, [onHover]);
+
   // 上方/下方還有幾個框的計數
   const [aboveCount, setAboveCount] = useState(0);
   const [belowCount, setBelowCount] = useState(0);
@@ -112,10 +121,11 @@ export default function PdfViewer({
           }
           if (!hasChange) return prev; // 內容沒變，返回原引用 → React 跳過 re-render
           const next = new Set(prev);
+          const added: number[] = [], removed: number[] = [];
           for (const entry of entries) {
             const pageNum = Number((entry.target as HTMLElement).dataset.pagenum);
-            if (entry.isIntersecting) next.add(pageNum);
-            else next.delete(pageNum);
+            if (entry.isIntersecting) { if (!prev.has(pageNum)) added.push(pageNum); next.add(pageNum); }
+            else { if (prev.has(pageNum)) removed.push(pageNum); next.delete(pageNum); }
           }
           return next;
         });
@@ -283,7 +293,6 @@ export default function PdfViewer({
       }
       const current = scrollRef.current.scrollTop;
       const diff = t - current;
-
       if (Math.abs(diff) < THRESHOLD) {
         scrollRef.current.scrollTop = t;
         viewerScrollRafRef.current = 0;
@@ -373,6 +382,13 @@ export default function PdfViewer({
     if (!scrollEl) return;
     let ticking = false;
     const handler = () => {
+      // 滾動開始：禁用 BoundingBox pointer-events，避免 hover 觸發 re-render lag
+      scrollEl.dataset.scrolling = '1';
+      if (scrollIdleTimerRef.current) clearTimeout(scrollIdleTimerRef.current);
+      scrollIdleTimerRef.current = setTimeout(() => {
+        delete scrollEl.dataset.scrolling;
+      }, 150);
+
       if (ticking) return;
       ticking = true;
       requestAnimationFrame(() => {
@@ -397,7 +413,10 @@ export default function PdfViewer({
     // 初始計算
     updateAboveBelowCounts();
     handler(); // 按鈕初始位置
-    return () => scrollEl.removeEventListener('scroll', handler);
+    return () => {
+      scrollEl.removeEventListener('scroll', handler);
+      if (scrollIdleTimerRef.current) clearTimeout(scrollIdleTimerRef.current);
+    };
   }, [updateAboveBelowCounts]);
 
   // pageRegions 變化時也重新計算
@@ -426,6 +445,7 @@ export default function PdfViewer({
         {pdfUrl ? (
           <Document
             file={pdfUrl}
+            className="flex flex-col items-center"
             onLoadSuccess={(pdf) => onDocumentLoad(pdf as unknown as pdfjs.PDFDocumentProxy)}
             loading={
               <div className="flex items-center justify-center w-[600px] h-[800px] bg-white">
@@ -574,7 +594,7 @@ export default function PdfViewer({
                   {/* Bounding Boxes 覆蓋層（也是畫新框的拖曳目標） */}
                   {isVisible && dim && dim.width > 0 && (
                     <div
-                      className="absolute top-0 left-0"
+                      className="absolute top-0 left-0 bbox-overlay"
                       style={{ width: dim.width, height: dim.height, cursor: 'crosshair' }}
                       onMouseDown={(e) => handleOverlayMouseDown(pageNum, dim, e)}
                     >
@@ -588,8 +608,8 @@ export default function PdfViewer({
                             displayWidth={dim.width}
                             displayHeight={dim.height}
                             isHovered={hoveredRegionId === regionKey}
-                            onHover={() => onHover(regionKey)}
-                            onHoverEnd={() => onHover(null)}
+                            onHover={() => guardedOnHover(regionKey)}
+                            onHoverEnd={() => guardedOnHover(null)}
                             onUpdate={(newBbox) => onRegionUpdate(pageNum, region.id, newBbox)}
                             onRemove={() => onRegionRemove(pageNum, region.id)}
                             onDoubleClick={() => onRegionDoubleClick(pageNum, region.id)}
@@ -637,14 +657,14 @@ export default function PdfViewer({
 
       {/* 上方框數提示 — absolute 覆蓋避免佈局抖動 */}
       {aboveCount > 0 && (
-        <div className="absolute top-0 left-0 right-0 flex justify-center py-1 bg-gray-800/90 text-white text-sm font-bold z-30 pointer-events-none">
+        <div className="absolute top-0 left-0 right-0 flex justify-center py-1 bg-gray-800/90 text-white text-base font-bold z-30 pointer-events-none">
           ↑ 上方還有 {aboveCount} 個框
         </div>
       )}
 
       {/* 下方框數提示 — absolute 覆蓋避免佈局抖動 */}
       {belowCount > 0 && (
-        <div className="absolute bottom-0 left-0 right-0 flex justify-center py-1 bg-gray-800/90 text-white text-sm font-bold z-30 pointer-events-none overflow-hidden">
+        <div className="absolute bottom-0 left-0 right-0 flex justify-center py-1 bg-gray-800/90 text-white text-base font-bold z-30 pointer-events-none overflow-hidden">
           ↓ 下方還有 {belowCount} 個框
         </div>
       )}

@@ -454,7 +454,6 @@ export default function PDFExtractApp() {
     } else {
       const hasUnfinished = filesRef.current.some((f) => f.status === 'idle' || f.status === 'stopped');
       const allDone = filesRef.current.length > 0 && filesRef.current.every((f) => f.status === 'done');
-
       if (hasUnfinished) {
         // 繼續分析：將 idle/stopped 設為 queued 並觸發佇列
         setFiles((prev) =>

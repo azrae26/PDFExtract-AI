@@ -638,8 +638,49 @@ export default function useFileManager({
       const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
       console.log(`[useFileManager][${ts}] 🚀 PDF already cached, starting analysis directly for ${nextQueued.id} (${completedPages?.size || 0} pages already done)`);
       analyzeAllPages(pagesToAnalyze, prompt, model, tablePrompt, batchSize, nextQueued.id, nextQueued.url, getNextFileForPool, handlePoolFileComplete, effectiveSkip2, completedPages, apiKey);
+    } else {
+      // PDF 不在快取中（檔案可能不在預載視窗內，PdfViewer 未掛載）→ 主動載入 PDF 後啟動分析
+      const queuedFileId = nextQueued.id;
+      const queuedFileUrl = nextQueued.url;
+      const queuedFileReport = nextQueued.report;
+      const queuedFileNumPages = nextQueued.numPages;
+      const queuedFilePageRegions = nextQueued.pageRegions;
+      pdfjs.getDocument(queuedFileUrl).promise.then((doc) => {
+        // 存入快取
+        if (!pdfDocCacheRef.current.has(queuedFileId)) {
+          pdfDocCacheRef.current.set(queuedFileId, doc);
+          selfLoadedDocIdsRef.current.add(queuedFileId);
+        }
+        // 更新 numPages
+        const pages = queuedFileNumPages || doc.numPages;
+        if (queuedFileNumPages === 0) {
+          setFiles((prev) =>
+            prev.map((f) => (f.id === queuedFileId ? { ...f, numPages: doc.numPages } : f))
+          );
+        }
+        // 計算有效忽略頁數 + 已完成頁面
+        const effectiveSkipAsync = (queuedFileReport && brokerSkipMapRef.current[queuedFileReport] !== undefined)
+          ? brokerSkipMapRef.current[queuedFileReport]
+          : skipLastPages;
+        const pagesToAnalyze = Math.max(1, pages - effectiveSkipAsync);
+        const completedPagesAsync = new Set<number>();
+        queuedFilePageRegions.forEach((_regions, pageNum) => {
+          if (pageNum >= 1 && pageNum <= pagesToAnalyze) {
+            completedPagesAsync.add(pageNum);
+          }
+        });
+        const ts2 = new Date().toLocaleTimeString('en-US', { hour12: false });
+        console.log(`[useFileManager][${ts2}] 🚀 PDF loaded on-demand, starting analysis for ${queuedFileId} (${completedPagesAsync.size} pages already done)`);
+        analyzeAllPages(pagesToAnalyze, prompt, model, tablePrompt, batchSize, queuedFileId, queuedFileUrl, getNextFileForPool, handlePoolFileComplete, effectiveSkipAsync, completedPagesAsync.size > 0 ? completedPagesAsync : undefined, apiKey);
+      }).catch((e) => {
+        const ts2 = new Date().toLocaleTimeString('en-US', { hour12: false });
+        console.error(`[useFileManager][${ts2}] ❌ Failed to load PDF on-demand for ${queuedFileId}:`, e);
+        setFiles((prev) =>
+          prev.map((f) => (f.id === queuedFileId ? { ...f, status: 'error' as const } : f))
+        );
+        processingQueueRef.current = false;
+      });
     }
-    // else: PdfViewer 尚未載入，等 handleDocumentLoadForFile 觸發
   }, [skipLastPages, prompt, model, tablePrompt, batchSize, apiKey, analyzeAllPages, getNextFileForPool, handlePoolFileComplete]);
 
   // === 觸發佇列處理（供外部呼叫，如「繼續分析」「全部重新分析」後啟動佇列）===

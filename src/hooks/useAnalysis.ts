@@ -147,6 +147,7 @@ export default function useAnalysis({
       apiKeyText?: string,
     ) => {
       // 記錄分析目標檔案 ID（primary file）
+      // 記錄分析目標檔案 ID（primary file）
       analysisFileIdRef.current = targetFileId;
 
       // 遞增 session，讓舊的非同步操作全部失效
@@ -923,9 +924,14 @@ export default function useAnalysis({
       // 只有當所有飛行中的頁面都完成時才停止分析狀態
       inFlightPageRef.current--;
       if (inFlightPageRef.current === 0) {
-        setBatchIsAnalyzing(false);
-        // 重置進度（避免下次累計混亂）
-        setAnalysisProgress({ current: 0, total: 0 });
+        // 守衛：若 batch pool 還在跑（analysisFileIdRef !== null），不能碰 batchIsAnalyzing / analysisProgress
+        // 否則會觸發 completion effect 把仍在 processing 的檔案全部標為 done
+        const poolStillRunning = analysisFileIdRef.current !== null;
+        if (!poolStillRunning) {
+          setBatchIsAnalyzing(false);
+          // 重置進度（避免下次累計混亂）
+          setAnalysisProgress({ current: 0, total: 0 });
+        }
         // 設回 done（僅限本地處理完畢；注入 pool 的由 handlePoolFileComplete 負責）
         if (!injectedToPool) {
           updateFileProgress(targetFileId, { status: 'done' });
