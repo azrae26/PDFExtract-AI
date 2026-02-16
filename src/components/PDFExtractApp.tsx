@@ -80,6 +80,11 @@ export default function PDFExtractApp() {
     const cfg = loadConfig();
     return typeof cfg.skipLastPages === 'number' ? cfg.skipLastPages : 2;
   });
+  // Gemini API 金鑰（持久化到 localStorage）
+  const [apiKey, setApiKey] = useState(() => {
+    const cfg = loadConfig();
+    return typeof cfg.apiKey === 'string' ? cfg.apiKey : '';
+  });
   // 券商 → 忽略末尾頁數映射（持久化到 localStorage）
   const [brokerSkipMap, setBrokerSkipMap] = useState<Record<string, number>>(() => {
     const cfg = loadConfig();
@@ -117,7 +122,7 @@ export default function PDFExtractApp() {
     handleStopFile, handleReanalyzeFile, triggerQueueProcessing,
     mountedFileIds,
   } = useFileManager({
-    prompt, tablePrompt, model, batchSize, skipLastPages, brokerSkipMap,
+    prompt, tablePrompt, model, batchSize, skipLastPages, brokerSkipMap, apiKey,
   });
 
   // === usePanelResize Hook（四欄分界線拖動）===
@@ -134,6 +139,7 @@ export default function PDFExtractApp() {
   useEffect(() => { saveConfig({ batchSize }); }, [batchSize]);
   useEffect(() => { saveConfig({ skipLastPages }); }, [skipLastPages]);
   useEffect(() => { saveConfig({ brokerSkipMap }); }, [brokerSkipMap]);
+  useEffect(() => { saveConfig({ apiKey }); }, [apiKey]);
   useEffect(() => { saveConfig({ fileListWidth }); }, [fileListWidth]);
   useEffect(() => { saveConfig({ leftWidth }); }, [leftWidth]);
   useEffect(() => { saveConfig({ rightWidth }); }, [rightWidth]);
@@ -376,16 +382,22 @@ export default function PDFExtractApp() {
         (f) => f.type === 'application/pdf'
       );
       if (droppedFiles.length > 0) {
-        // 左=當前頁並跑, 中=背景跑, 右=僅加入列表
-        const mode = zone === 'left' ? 'active' : zone === 'right' ? 'idle' : 'background';
-        handleFilesUpload(droppedFiles, mode);
+        // 無金鑰 → 強制 idle（不觸發分析）
+        if (!apiKey) {
+          handleFilesUpload(droppedFiles, 'idle');
+        } else {
+          // 左=當前頁並跑, 中=背景跑, 右=僅加入列表
+          const mode = zone === 'left' ? 'active' : zone === 'right' ? 'idle' : 'background';
+          handleFilesUpload(droppedFiles, mode);
+        }
       }
     },
-    [handleFilesUpload, dragZone]
+    [handleFilesUpload, dragZone, apiKey]
   );
 
   // === 全域分析 toggle handler（FileListPanel 用）===
   const handleToggleAnalysis = useCallback(() => {
+    if (!apiKey && !isAnalyzing) return; // 無金鑰時不允許啟動分析
     if (isAnalyzing) {
       // 全域暫停
       handleStop();
@@ -417,7 +429,7 @@ export default function PDFExtractApp() {
         setTimeout(() => triggerQueueProcessing(), 0);
       }
     }
-  }, [isAnalyzing, handleStop, setFiles, filesRef, triggerQueueProcessing]);
+  }, [isAnalyzing, apiKey, handleStop, setFiles, filesRef, triggerQueueProcessing]);
 
   // 分界線共用的 UI 元素
   const Divider = ({ side }: { side: 'fileList' | 'left' | 'right' }) => (
@@ -531,11 +543,13 @@ export default function PDFExtractApp() {
           onBatchSizeChange={setBatchSize}
           skipLastPages={skipLastPages}
           onSkipLastPagesChange={setSkipLastPages}
+          apiKey={apiKey}
+          onApiKeyChange={setApiKey}
           isAnalyzing={activeFile?.status === 'processing'}
           progress={{ current: activeFile?.completedPages ?? 0, total: activeFile?.analysisPages ?? 0 }}
           numPages={numPages}
           onReanalyze={() => {
-            if (!activeFileId || !activeFile) return;
+            if (!activeFileId || !activeFile || !apiKey) return;
             // 若檔案已有券商名且在 brokerSkipMap 中有設定，優先使用券商特定值
             const effectiveSkipRe = (activeFile.report && brokerSkipMap[activeFile.report] !== undefined)
               ? brokerSkipMap[activeFile.report]
@@ -599,7 +613,7 @@ export default function PDFExtractApp() {
                 onRegionAdd={handleRegionAdd}
                 getGlobalColorOffset={fileGetGlobalColorOffset}
                 scrollToRegionKey={isActive ? scrollTarget : null}
-                onReanalyzePage={(pageNum: number) => handleReanalyzePage(pageNum, file.id)}
+                onReanalyzePage={(pageNum: number) => { if (apiKey) handleReanalyzePage(pageNum, file.id); }}
                 analyzingPages={fileAnalyzingPages}
                 queuedPages={fileQueuedPages}
                 onCancelQueuedPage={(pageNum: number) => cancelQueuedPage(file.id, pageNum)}
@@ -608,6 +622,7 @@ export default function PDFExtractApp() {
                 onToggleOriginalBbox={() => setShowOriginalBbox(prev => !prev)}
                 onBboxClick={handleBboxClick}
                 onRegionDoubleClick={(page: number, regionId: number) => {
+                  if (!apiKey) return;
                   const region = file.pageRegions.get(page)?.find((r) => r.id === regionId);
                   if (region) {
                     handleRegionDoubleClick(page, region, file.id);

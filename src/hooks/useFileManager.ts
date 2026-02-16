@@ -42,6 +42,8 @@ interface UseFileManagerOptions {
   batchSize: number;
   skipLastPages: number;
   brokerSkipMap: Record<string, number>;
+  /** Gemini API 金鑰（前端使用者輸入） */
+  apiKey: string;
 }
 
 // === Hook 輸出介面 ===
@@ -98,6 +100,7 @@ export default function useFileManager({
   batchSize,
   skipLastPages,
   brokerSkipMap,
+  apiKey,
 }: UseFileManagerOptions): FileManagerResult {
   // === 多檔案狀態 ===
   const [files, setFiles] = useState<FileEntry[]>([]);
@@ -273,6 +276,7 @@ export default function useFileManager({
     tablePrompt,
     model,
     batchSize,
+    apiKey,
   });
   // 橋接 cancelQueuedPage 到 ref（供 updateFileReport 回呼使用）
   cancelQueuedPageRef.current = cancelQueuedPage;
@@ -434,10 +438,10 @@ export default function useFileManager({
         setFiles((prev) =>
           prev.map((f) => (f.id === targetFileId ? { ...f, status: 'processing' as const, analysisPages: 0, completedPages: 0 } : f))
         );
-        analyzeAllPages(numPagesToAnalyze, prompt, model, tablePrompt, batchSize, targetFileId, fileUrl, getNextFileForPool, handlePoolFileComplete);
+        analyzeAllPages(numPagesToAnalyze, prompt, model, tablePrompt, batchSize, targetFileId, fileUrl, getNextFileForPool, handlePoolFileComplete, undefined, undefined, apiKey);
       }
     },
-    [isAnalyzing, prompt, model, tablePrompt, batchSize, analyzeAllPages, updateFileRegions, updateFileProgress, stopSingleFile, getNextFileForPool, handlePoolFileComplete]
+    [isAnalyzing, prompt, model, tablePrompt, batchSize, apiKey, analyzeAllPages, updateFileRegions, updateFileProgress, stopSingleFile, getNextFileForPool, handlePoolFileComplete]
   );
 
   // === 切換檔案時：清理 pdfDocRef，條件性中斷 session ===
@@ -588,6 +592,11 @@ export default function useFileManager({
   // 若 pdfDocCacheRef 已有該檔案的 doc（PdfViewer 預掛載已載入），直接呼叫 analyzeAllPages
   // 否則等 handleDocumentLoadForFile 觸發（防止雙重啟動由 analysisFileIdRef 守衛）
   const processNextInQueue = useCallback(() => {
+    // 無 API 金鑰時不啟動分析
+    if (!apiKey) {
+      processingQueueRef.current = false;
+      return;
+    }
     const latestFiles = filesRef.current;
     const nextQueued = latestFiles.find((f) => f.status === 'queued');
     if (!nextQueued) {
@@ -628,10 +637,10 @@ export default function useFileManager({
       const completedPages = buildCompletedPages(nextQueued, pagesToAnalyze);
       const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
       console.log(`[useFileManager][${ts}] 🚀 PDF already cached, starting analysis directly for ${nextQueued.id} (${completedPages?.size || 0} pages already done)`);
-      analyzeAllPages(pagesToAnalyze, prompt, model, tablePrompt, batchSize, nextQueued.id, nextQueued.url, getNextFileForPool, handlePoolFileComplete, effectiveSkip2, completedPages);
+      analyzeAllPages(pagesToAnalyze, prompt, model, tablePrompt, batchSize, nextQueued.id, nextQueued.url, getNextFileForPool, handlePoolFileComplete, effectiveSkip2, completedPages, apiKey);
     }
     // else: PdfViewer 尚未載入，等 handleDocumentLoadForFile 觸發
-  }, [skipLastPages, prompt, model, tablePrompt, batchSize, analyzeAllPages, getNextFileForPool, handlePoolFileComplete]);
+  }, [skipLastPages, prompt, model, tablePrompt, batchSize, apiKey, analyzeAllPages, getNextFileForPool, handlePoolFileComplete]);
 
   // === 觸發佇列處理（供外部呼叫，如「繼續分析」「全部重新分析」後啟動佇列）===
   const triggerQueueProcessing = useCallback(() => {
@@ -754,8 +763,9 @@ export default function useFileManager({
 
       // 如果此檔案是 processing 狀態且尚未在分析中，自動開始分析
       // 重要：若 analysisFileIdRef.current 已等於此檔案 ID，表示分析正在進行，不要重啟
+      // 重要：無 API 金鑰時不啟動分析
       const currentFile = filesRef.current.find((f) => f.id === fileId);
-      if (currentFile?.status === 'processing' && analysisFileIdRef.current !== fileId) {
+      if (apiKey && currentFile?.status === 'processing' && analysisFileIdRef.current !== fileId) {
         // 若檔案已有券商名且在 brokerSkipMap 中有設定，優先使用券商特定值
         const effectiveSkipDoc = (currentFile.report && brokerSkipMapRef.current[currentFile.report] !== undefined)
           ? brokerSkipMapRef.current[currentFile.report]
@@ -768,10 +778,10 @@ export default function useFileManager({
             completedPages.add(pageNum);
           }
         });
-        analyzeAllPages(pagesToAnalyze, prompt, model, tablePrompt, batchSize, fileId, currentFile.url, getNextFileForPool, handlePoolFileComplete, effectiveSkipDoc, completedPages.size > 0 ? completedPages : undefined);
+        analyzeAllPages(pagesToAnalyze, prompt, model, tablePrompt, batchSize, fileId, currentFile.url, getNextFileForPool, handlePoolFileComplete, effectiveSkipDoc, completedPages.size > 0 ? completedPages : undefined, apiKey);
       }
     },
-    [prompt, model, tablePrompt, batchSize, skipLastPages, analyzeAllPages, getNextFileForPool, handlePoolFileComplete]
+    [prompt, model, tablePrompt, batchSize, skipLastPages, apiKey, analyzeAllPages, getNextFileForPool, handlePoolFileComplete]
   );
 
   // === 分析完成後，標記殘餘 processing 檔案 + 處理 stopped 狀態 ===

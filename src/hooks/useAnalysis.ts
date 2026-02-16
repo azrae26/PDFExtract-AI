@@ -42,6 +42,8 @@ interface UseAnalysisOptions {
   tablePrompt: string;
   model: string;
   batchSize: number;
+  /** Gemini API 金鑰（前端使用者輸入） */
+  apiKey: string;
 }
 
 export default function useAnalysis({
@@ -53,6 +55,7 @@ export default function useAnalysis({
   tablePrompt,
   model,
   batchSize,
+  apiKey,
 }: UseAnalysisOptions) {
   const [batchIsAnalyzing, setBatchIsAnalyzing] = useState(false);
   const [analysisProgress, setAnalysisProgress] = useState({ current: 0, total: 0 });
@@ -119,6 +122,7 @@ export default function useAnalysis({
     updateFileProgress,
     tablePrompt,
     model,
+    apiKey,
   });
 
   // 合併分析狀態：批次分析 或 區域識別 任一進行中即為 true
@@ -140,6 +144,7 @@ export default function useAnalysis({
       onFileComplete?: (fileId: string, error?: boolean) => void,
       effectiveSkip?: number,
       alreadyCompletedPages?: Set<number>,
+      apiKeyText?: string,
     ) => {
       // 記錄分析目標檔案 ID（primary file）
       analysisFileIdRef.current = targetFileId;
@@ -481,7 +486,7 @@ export default function useAnalysis({
             const arTs = new Date().toLocaleTimeString('en-US', { hour12: false });
             console.log(`[useAnalysis][${arTs}] 📐 Auto-recognize region bbox=[${regionBbox}]: ${width}x${height}px, ${sizeKB} KB`);
 
-            const recognizeResult = await recognizeRegionWithRetry(base64, tablePromptText, modelId, pageNum, region.id);
+            const recognizeResult = await recognizeRegionWithRetry(base64, tablePromptText, modelId, pageNum, region.id, apiKeyText);
 
             if (!isSessionValid(sessionId)) return;
 
@@ -558,7 +563,7 @@ export default function useAnalysis({
         });
         addAnalyzingPage(fileId, pageNum);
 
-        const result = await analyzePageWithRetry(pageNum, promptText, modelId, pdfDoc, sessionId, isSessionValid);
+        const result = await analyzePageWithRetry(pageNum, promptText, modelId, pdfDoc, sessionId, isSessionValid, apiKeyText);
 
         // 分析完成，移除標記
         removeAnalyzingPage(fileId, pageNum);
@@ -724,10 +729,10 @@ export default function useAnalysis({
     (numPages: number, targetFileId: string, fileUrl: string) => {
       if (numPages > 0 && fileUrl) {
         updateFileRegions(targetFileId, () => new Map());
-        analyzeAllPages(numPages, prompt, model, tablePrompt, batchSize, targetFileId, fileUrl);
+        analyzeAllPages(numPages, prompt, model, tablePrompt, batchSize, targetFileId, fileUrl, undefined, undefined, undefined, undefined, apiKey);
       }
     },
-    [prompt, model, tablePrompt, batchSize, analyzeAllPages, updateFileRegions]
+    [prompt, model, tablePrompt, batchSize, apiKey, analyzeAllPages, updateFileRegions]
   );
 
   // === 重新分析單頁（修正：支援多頁同時重送，計數會累加而非覆蓋）===
@@ -795,7 +800,7 @@ export default function useAnalysis({
       // 標記此頁正在分析（per-file）
       addAnalyzingPage(targetFileId, pageNum);
 
-      const result = await analyzePageWithRetry(pageNum, prompt, model, pdfDoc, sessionId, isSessionValid);
+      const result = await analyzePageWithRetry(pageNum, prompt, model, pdfDoc, sessionId, isSessionValid, apiKey);
 
       // 完成：累加 current，而非直接設定
       setAnalysisProgress((prev) => ({
@@ -862,7 +867,7 @@ export default function useAnalysis({
                 const arTs2 = new Date().toLocaleTimeString('en-US', { hour12: false });
                 console.log(`[useAnalysis][${arTs2}] 📐 Auto-recognize region bbox=[${regionBbox}]: ${width}x${height}px, ${sizeKB} KB`);
 
-                const recognizeResult = await recognizeRegionWithRetry(base64, tablePrompt, model, pageNum, region.id);
+                const recognizeResult = await recognizeRegionWithRetry(base64, tablePrompt, model, pageNum, region.id, apiKey);
 
                 if (!isSessionValid(sessionId)) return;
 
@@ -927,7 +932,7 @@ export default function useAnalysis({
         }
       }
     },
-    [prompt, model, tablePrompt, batchSize, pdfDocRef, updateFileRegions, updateFileReport, updateFileProgress, isSessionValid, queuedPagesMap, addAnalyzingPage, removeAnalyzingPage]
+    [prompt, model, tablePrompt, batchSize, apiKey, pdfDocRef, updateFileRegions, updateFileReport, updateFileProgress, isSessionValid, queuedPagesMap, addAnalyzingPage, removeAnalyzingPage]
   );
 
   return {

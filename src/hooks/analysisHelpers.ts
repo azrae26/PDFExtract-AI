@@ -1,6 +1,6 @@
 /**
  * 功能：PDF 分析核心純函式工具模組
- * 職責：PDF 頁面渲染、API 呼叫（含失敗自動重試最多 2 次）、分析結果合併（回傳空文字 region 清單）、
+ * 職責：PDF 頁面渲染、API 呼叫（含失敗自動重試最多 2 次、前端傳入 apiKey）、分析結果合併（回傳空文字 region 清單）、
  *       頁面 canvas 渲染與區域裁切（renderPageCanvas + cropRegionFromCanvas，支援同頁多 region 複用同一 canvas）、
  *       區域截圖裁切、區域識別 API
  * 依賴：pdfjs、types、constants、pdfTextExtract
@@ -106,6 +106,7 @@ export async function analyzePageWithRetry(
   pdfDoc: pdfjs.PDFDocumentProxy,
   sessionId: number,
   isSessionValid: SessionValidator,
+  apiKey?: string,
 ) {
   const imageBase64 = await renderPageToImage(pageNum, pdfDoc, sessionId, isSessionValid);
   if (!imageBase64) return null; // rendering 被取消或 session 失效
@@ -130,6 +131,7 @@ export async function analyzePageWithRetry(
           prompt: promptText,
           page: pageNum,
           model: modelId,
+          ...(apiKey ? { apiKey } : {}),
         }),
       });
 
@@ -335,6 +337,7 @@ export async function recognizeRegionWithRetry(
   modelId: string,
   page: number,
   regionId: number,
+  apiKey?: string,
 ): Promise<{ success: boolean; text?: string; error?: string }> {
   let lastError = '';
 
@@ -354,6 +357,7 @@ export async function recognizeRegionWithRetry(
           model: modelId,
           page,
           regionId,
+          ...(apiKey ? { apiKey } : {}),
         }),
       });
       const result = await response.json();

@@ -1,7 +1,7 @@
 /**
  * 功能：Gemini API 分析端點
  * 職責：接收 PDF 頁面圖片 + Prompt，呼叫 Gemini API 回傳標註區域與券商名（report）
- * 依賴：@google/generative-ai、環境變數 GEMINI_API_KEY
+ * 依賴：@google/generative-ai、前端傳入的 apiKey（優先）或環境變數 GEMINI_API_KEY（fallback）
  */
 
 import { GoogleGenerativeAI } from '@google/generative-ai';
@@ -17,7 +17,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<AnalyzeRe
   const timestamp = new Date().toLocaleTimeString('en-US', { hour12: false });
 
   try {
-    const { image, prompt, page, model: modelId } = await request.json();
+    const { image, prompt, page, model: modelId, apiKey: clientApiKey } = await request.json();
 
     if (!image || !prompt) {
       console.error(`[AnalyzeRoute][${timestamp}] ❌ Missing image or prompt`);
@@ -27,12 +27,13 @@ export async function POST(request: NextRequest): Promise<NextResponse<AnalyzeRe
       );
     }
 
-    const apiKey = process.env.GEMINI_API_KEY;
+    // 優先使用前端傳入的 apiKey，fallback 到環境變數
+    const apiKey = clientApiKey || process.env.GEMINI_API_KEY;
     if (!apiKey || apiKey === 'YOUR_GEMINI_API_KEY_HERE') {
       console.error(`[AnalyzeRoute][${timestamp}] ❌ GEMINI_API_KEY not configured`);
       return NextResponse.json(
-        { success: false, error: 'GEMINI_API_KEY 未設定' },
-        { status: 500 }
+        { success: false, error: '請先設定 Gemini API 金鑰' },
+        { status: 400 }
       );
     }
 

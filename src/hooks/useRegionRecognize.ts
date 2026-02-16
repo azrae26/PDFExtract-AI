@@ -27,6 +27,8 @@ interface UseRegionRecognizeOptions {
   updateFileProgress: FileProgressUpdater;
   tablePrompt: string;
   model: string;
+  /** Gemini API 金鑰（前端使用者輸入） */
+  apiKey: string;
 }
 
 export default function useRegionRecognize({
@@ -35,6 +37,7 @@ export default function useRegionRecognize({
   updateFileProgress,
   tablePrompt,
   model,
+  apiKey,
 }: UseRegionRecognizeOptions) {
   // 獨立的識別中狀態（與批次分析的 isAnalyzing 分離）
   const [isRecognizing, setIsRecognizing] = useState(false);
@@ -76,7 +79,7 @@ export default function useRegionRecognize({
         console.log(`[useRegionRecognize][${ts}] 📐 Cropped region: ${width}x${height}px, ${sizeKB} KB`);
 
         // 送 API（含重試）
-        const result = await recognizeRegionWithRetry(base64, tablePrompt, model, page, regionId);
+        const result = await recognizeRegionWithRetry(base64, tablePrompt, model, page, regionId, apiKey);
 
         if (result.success && result.text) {
           updateFileRegions(targetFileId, (prev) => {
@@ -133,7 +136,7 @@ export default function useRegionRecognize({
         setIsRecognizing(false);
       }
     },
-    [pdfDocRef, tablePrompt, model, updateFileRegions, updateFileProgress]
+    [pdfDocRef, tablePrompt, model, apiKey, updateFileRegions, updateFileProgress]
   );
 
   return {
