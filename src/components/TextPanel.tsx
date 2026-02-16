@@ -23,6 +23,8 @@ interface TextPanelProps {
   onRegionRemove: (page: number, regionId: number) => void;
   /** 重新排序某頁的 regions */
   onReorderRegions: (page: number, reorderedRegions: Region[]) => void;
+  /** 從 PdfViewer 點擊 BoundingBox 時滾動到對應文字框（regionKey 格式 "page-regionId"） */
+  scrollToRegionKey?: string | null;
 }
 
 export default function TextPanel({
@@ -34,6 +36,7 @@ export default function TextPanel({
   onClickRegion,
   onRegionRemove,
   onReorderRegions,
+  scrollToRegionKey,
 }: TextPanelProps) {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const regionRefs = useRef<Map<string, HTMLDivElement>>(new Map());
@@ -53,10 +56,9 @@ export default function TextPanel({
     overIndex: number;
   } | null>(null);
 
-  // === 自動滾動：兩條獨立事件路徑，各自設定不同滾動參數 ===
-  // 路徑 1：PdfViewer 連動 → useEffect 監聽 hoveredRegionId → 滾到 20~80% 區間
-  // 路徑 2：TextPanel 本身 hover → onMouseEnter 直接呼叫 → 只確保可見即可（8px 緩衝）
-  // 共用底層 lerp 動畫，skipScrollRef 讓 useEffect 跳過 self hover（onMouseEnter 設 true、onMouseLeave 設 false，不在 useEffect 中改動，Strict Mode 安全）
+  // === 自動滾動：PdfViewer 點擊 BoundingBox → 右欄滾動到對應文字框 ===
+  // useEffect 監聽 scrollToRegionKey → lerp 動畫滾到 15~85% 區間
+  // skipScrollRef 標記滑鼠在 TextPanel 上（onMouseEnter 設 true、onMouseLeave 設 false）
   const scrollTargetRef = useRef<number | null>(null);
   const scrollRafRef = useRef<number>(0);
   const skipScrollRef = useRef(false);
@@ -67,7 +69,7 @@ export default function TextPanel({
     // 若動畫已在跑，不重複啟動（loop 會自動讀取最新 target）
     if (scrollRafRef.current) return;
 
-    const LERP_FACTOR = 0.15;
+    const LERP_FACTOR = 0.07;
     const THRESHOLD = 0.5;
 
     const animate = () => {
@@ -87,19 +89,40 @@ export default function TextPanel({
       }
 
       scrollContainerRef.current.scrollTop = current + diff * LERP_FACTOR;
+      // 邊界檢測：scrollTop 被瀏覽器 clamp 後沒變化 = 已到邊界，終止動畫
+      if (scrollContainerRef.current.scrollTop === current) {
+        scrollRafRef.current = 0;
+        scrollTargetRef.current = null;
+        return;
+      }
       scrollRafRef.current = requestAnimationFrame(animate);
     };
 
     scrollRafRef.current = requestAnimationFrame(animate);
   }, []);
 
-  // 路徑 1：PdfViewer 連動 → 滾到 15~85% 區間
+  // 用戶手動滾輪時取消正在進行的動畫，避免動畫覆蓋用戶操作
   useEffect(() => {
-    if (!hoveredRegionId || skipScrollRef.current) {
-      if (!hoveredRegionId) scrollTargetRef.current = null;
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    const handleWheel = () => {
+      if (scrollRafRef.current) {
+        cancelAnimationFrame(scrollRafRef.current);
+        scrollRafRef.current = 0;
+        scrollTargetRef.current = null;
+      }
+    };
+    container.addEventListener('wheel', handleWheel, { passive: true });
+    return () => container.removeEventListener('wheel', handleWheel);
+  }, []);
+
+  // 路徑 1：PdfViewer 點擊 BoundingBox 連動 → 滾到 15~85% 區間
+  useEffect(() => {
+    if (!scrollToRegionKey) {
+      scrollTargetRef.current = null;
       return;
     }
-    const el = regionRefs.current.get(hoveredRegionId);
+    const el = regionRefs.current.get(scrollToRegionKey);
     const container = scrollContainerRef.current;
     if (!el || !container) return;
 
@@ -129,35 +152,8 @@ export default function TextPanel({
         scrollRafRef.current = 0;
       }
     };
-  }, [hoveredRegionId, animateScrollTo]);
+  }, [scrollToRegionKey, animateScrollTo]);
 
-  // 路徑 2：TextPanel 本身 hover → 只確保可見即可
-  // 直接設定 scrollTop（不用 lerp 動畫），因為：
-  // 1. 元素已幾乎可見（能 hover 到），只差一小段距離
-  // 2. 若用 lerp，滾動會改變元素畫面位置 → 觸發 mouseLeave → 動畫被中斷
-  const handleSelfHoverScroll = useCallback((regionKey: string) => {
-    const el = regionRefs.current.get(regionKey);
-    const container = scrollContainerRef.current;
-    if (!el || !container) return;
-
-    const containerRect = container.getBoundingClientRect();
-    const elRect = el.getBoundingClientRect();
-    const containerHeight = containerRect.height;
-    const elTopInContainer = elRect.top - containerRect.top;
-    const elBottomInContainer = elRect.bottom - containerRect.top;
-
-    const SCROLL_PADDING = 8;
-    let scrollDelta = 0;
-    if (elTopInContainer < SCROLL_PADDING) {
-      scrollDelta = elTopInContainer - SCROLL_PADDING;
-    } else if (elBottomInContainer > containerHeight - SCROLL_PADDING) {
-      scrollDelta = elBottomInContainer - (containerHeight - SCROLL_PADDING);
-    } else {
-      return; // 已完全在可視範圍內
-    }
-
-    container.scrollTop += scrollDelta;
-  }, []);
 
   // 複製全部文字到剪貼簿
   const handleCopyAll = useCallback(() => {
@@ -323,7 +319,7 @@ export default function TextPanel({
                           setTimeout(() => setCopiedKey(null), 1200);
                         }
                       }}
-                      onMouseEnter={() => { skipScrollRef.current = true; onHover(regionKey); handleSelfHoverScroll(regionKey); }}
+                      onMouseEnter={() => { skipScrollRef.current = true; onHover(regionKey); }}
                       onMouseLeave={() => { skipScrollRef.current = false; onHover(null); }}
                     >
                       {/* X 刪除按鈕 — 右上角 */}

@@ -30,6 +30,8 @@ interface BoundingBoxProps {
   onRemove: () => void;
   /** 雙擊此 region（截圖送 AI 識別） */
   onDoubleClick: () => void;
+  /** 單擊此 region（觸發右欄滾動） */
+  onClick?: () => void;
   /** 是否顯示校正前的 bbox */
   showOriginalBbox?: boolean;
   /** 頁碼（debug 用） */
@@ -79,6 +81,7 @@ export default function BoundingBox({
   onUpdate,
   onRemove,
   onDoubleClick,
+  onClick,
   showOriginalBbox,
   pageNumber,
 }: BoundingBoxProps) {
@@ -184,6 +187,10 @@ export default function BoundingBox({
         onMouseEnter={onHover}
         onMouseLeave={onHoverEnd}
         onContextMenu={handleContextMenu}
+        onClick={(e) => {
+          e.stopPropagation();
+          onClick?.();
+        }}
         onDoubleClick={(e) => {
           e.stopPropagation();
           onDoubleClick();

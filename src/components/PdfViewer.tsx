@@ -39,6 +39,8 @@ interface PdfViewerProps {
   onReanalyzePage: (page: number) => void;
   /** 雙擊框框 → 截圖送 AI 識別 */
   onRegionDoubleClick: (page: number, regionId: number) => void;
+  /** 單擊框框 → 觸發右欄滾動到對應文字 */
+  onBboxClick?: (regionKey: string) => void;
   /** 正在分析中的頁碼集合（按鈕顯示旋轉動畫） */
   analyzingPages: Set<number>;
   /** 排隊等待分析的頁碼集合（按鈕顯示 X 取消） */
@@ -73,6 +75,7 @@ export default function PdfViewer({
   onRemoveAllRegions,
   showOriginalBbox,
   onToggleOriginalBbox,
+  onBboxClick,
 }: PdfViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [pageWidth, setPageWidth] = useState(600);
@@ -248,16 +251,80 @@ export default function PdfViewer({
     console.error('[PdfViewer] Page load error:', error);
   }, []);
 
-  // 當 scrollToRegionKey 變化時，滾動到對應頁面讓框框在畫面內
+  // 當 scrollToRegionKey 變化時，lerp 動畫滾動到對應頁面（置中）
+  const viewerScrollRafRef = useRef<number>(0);
+  const viewerScrollTargetRef = useRef<number | null>(null);
+
   useEffect(() => {
     if (!scrollToRegionKey) return;
+    const scrollEl = scrollRef.current;
+    if (!scrollEl) return;
     const pageNum = parseInt(scrollToRegionKey.split('-')[0], 10);
     if (isNaN(pageNum)) return;
     const pageEl = pageElRefs.current.get(pageNum);
-    if (pageEl) {
-      pageEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    }
+    if (!pageEl) return;
+
+    // 計算目標 scrollTop：讓頁面置中
+    const pageTop = pageEl.offsetTop;
+    const pageHeight = pageEl.offsetHeight;
+    const target = pageTop + pageHeight / 2 - scrollEl.clientHeight / 2;
+    viewerScrollTargetRef.current = target;
+
+    if (viewerScrollRafRef.current) return; // 動畫已在跑，更新 target 即可
+
+    const LERP_FACTOR = 0.15;
+    const THRESHOLD = 0.5;
+
+    const animate = () => {
+      const t = viewerScrollTargetRef.current;
+      if (t === null || !scrollRef.current) {
+        viewerScrollRafRef.current = 0;
+        return;
+      }
+      const current = scrollRef.current.scrollTop;
+      const diff = t - current;
+
+      if (Math.abs(diff) < THRESHOLD) {
+        scrollRef.current.scrollTop = t;
+        viewerScrollRafRef.current = 0;
+        viewerScrollTargetRef.current = null;
+        return;
+      }
+
+      scrollRef.current.scrollTop = current + diff * LERP_FACTOR;
+      // 邊界檢測：已到頂/底，終止動畫
+      if (scrollRef.current.scrollTop === current) {
+        viewerScrollRafRef.current = 0;
+        viewerScrollTargetRef.current = null;
+        return;
+      }
+      viewerScrollRafRef.current = requestAnimationFrame(animate);
+    };
+
+    viewerScrollRafRef.current = requestAnimationFrame(animate);
+
+    return () => {
+      if (viewerScrollRafRef.current) {
+        cancelAnimationFrame(viewerScrollRafRef.current);
+        viewerScrollRafRef.current = 0;
+      }
+    };
   }, [scrollToRegionKey]);
+
+  // 用戶手動滾輪時取消正在進行的動畫
+  useEffect(() => {
+    const scrollEl = scrollRef.current;
+    if (!scrollEl) return;
+    const handleWheel = () => {
+      if (viewerScrollRafRef.current) {
+        cancelAnimationFrame(viewerScrollRafRef.current);
+        viewerScrollRafRef.current = 0;
+        viewerScrollTargetRef.current = null;
+      }
+    };
+    scrollEl.addEventListener('wheel', handleWheel, { passive: true });
+    return () => scrollEl.removeEventListener('wheel', handleWheel);
+  }, []);
 
   // 計算可視區域上方/下方的 region 數量
   const updateAboveBelowCounts = useCallback(() => {
@@ -526,6 +593,7 @@ export default function PdfViewer({
                             onUpdate={(newBbox) => onRegionUpdate(pageNum, region.id, newBbox)}
                             onRemove={() => onRegionRemove(pageNum, region.id)}
                             onDoubleClick={() => onRegionDoubleClick(pageNum, region.id)}
+                            onClick={() => onBboxClick?.(regionKey)}
                             showOriginalBbox={showOriginalBbox}
                             pageNumber={pageNum}
                           />
