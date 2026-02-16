@@ -196,8 +196,8 @@ export default function PdfUploader({
             {/* 進度統計：已完成(completedPages/analysisPages) / 總頁數 / 券商名（始終顯示） */}
             <div className="flex gap-1 text-center">
               <div className="rounded-md bg-green-50 py-1.5 px-2" style={{ flex: '1 1 auto' }}>
-                <div className="text-lg font-extrabold text-green-600 tracking-widest">
-                  {progress.current}/{progress.total}
+                <div className="text-lg font-extrabold text-green-600">
+                  {progress.current}<span className="mx-0.5">/</span>{progress.total}
                 </div>
                 <div className="text-[9px] text-green-600">已完成</div>
               </div>
@@ -435,7 +435,7 @@ export default function PdfUploader({
           <textarea
             value={prompt}
             onChange={(e) => onPromptChange(e.target.value)}
-            className="w-full h-[28rem] p-3 text-[14px] border border-gray-300 rounded-lg resize-y focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-gray-50 text-gray-800 leading-relaxed"
+            className="w-full h-[330px] p-3 text-[14px] border border-gray-300 rounded-lg resize-y focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-gray-50 text-gray-800 leading-relaxed"
             placeholder="輸入分析指令..."
           />
         </div>
