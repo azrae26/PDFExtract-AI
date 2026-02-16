@@ -3,7 +3,7 @@
  * 職責：管理 files[] 狀態（唯一資料來源）、PDF 預載快取、分析佇列協調、檔案上傳（三模式：背景跑/當前頁並跑/僅加入列表）/刪除/清空、
  *       整合 useAnalysis hook、PDF Document 載入回呼、分析完成收尾、mountedFileIds 衍生計算、
  *       per-file 停止（handleStopFile）、重新分析排隊制（handleReanalyzeFile + priorityFileIdRef）
- * 依賴：react、react-pdf (pdfjs)、useAnalysis hook、brokerUtils
+ * 依賴：react、react-pdf (pdfjs)、useAnalysis hook、brokerUtils、persistence (IndexedDB)
  *
  * 重要設計：
  * - files 陣列是唯一資料來源（Single Source of Truth），每個 FileEntry 擁有自己的 pageRegions
@@ -19,6 +19,7 @@ import { Region, FileEntry } from '@/lib/types';
 import { FileProgressUpdater } from '@/hooks/analysisHelpers';
 import { parseBrokerFromFilename } from '@/lib/brokerUtils';
 import useAnalysis from '@/hooks/useAnalysis';
+import { saveSession, loadSession, savePdfBlob, deletePdfBlob, clearAll as clearAllPersistence } from '@/lib/persistence';
 
 // === PDF 預載 / 快取常數 ===
 const PDF_PRELOAD_WINDOW = 5; // 預載視窗大小（目前 + 後 4 份）
@@ -108,6 +109,12 @@ export default function useFileManager({
   activeFileIdRef.current = activeFileId;
   // 標記是否正在自動處理佇列（避免重複觸發）
   const processingQueueRef = useRef(false);
+
+  // === IndexedDB 持久化 ===
+  /** 標記 IndexedDB 恢復是否已完成（防止初始 files=[] 覆蓋已存的資料） */
+  const initializedRef = useRef(false);
+  /** debounce 自動存檔的 timer */
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // === 目前活躍檔案的衍生狀態 ===
   const activeFile = files.find((f) => f.id === activeFileId) ?? null;
@@ -549,6 +556,32 @@ export default function useFileManager({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // === 從 IndexedDB 恢復 session（mount-only）===
+  useEffect(() => {
+    loadSession().then((restored) => {
+      if (restored && restored.files.length > 0) {
+        setFiles(restored.files);
+        setActiveFileId(restored.activeFileId);
+        const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
+        console.log(`[useFileManager][${ts}] ✅ Restored ${restored.files.length} file(s) from IndexedDB`);
+      }
+      initializedRef.current = true;
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // === 自動存檔到 IndexedDB（debounced 2s）===
+  useEffect(() => {
+    if (!initializedRef.current) return;
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = setTimeout(() => {
+      saveSession(activeFileId, files);
+    }, 2000);
+    return () => {
+      if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    };
+  }, [files, activeFileId]);
+
   // === 處理佇列中的下一個檔案 ===
   // 不自動切換 activeFileId（使用者留在目前檢視的檔案），僅在無活躍檔案時才設定
   // 若 pdfDocCacheRef 已有該檔案的 doc（PdfViewer 預掛載已載入），直接呼叫 analyzeAllPages
@@ -642,6 +675,17 @@ export default function useFileManager({
       });
 
       setFiles((prev) => [...prev, ...newEntries]);
+
+      // 儲存 PDF binary 到 IndexedDB，完成後立即存檔 session（確保 F5 不遺失）
+      Promise.all(
+        newEntries.map((entry) => entry.file.arrayBuffer().then((buf) => savePdfBlob(entry.id, buf)))
+      ).then(() => {
+        // setTimeout(0) 確保 React state 已更新（filesRef.current 已包含新檔案）
+        setTimeout(() => {
+          if (saveTimerRef.current) { clearTimeout(saveTimerRef.current); saveTimerRef.current = null; }
+          saveSession(activeFileIdRef.current, filesRef.current);
+        }, 0);
+      });
 
       // active 模式：立即切換到第一個新檔案
       if (mode === 'active' && newEntries.length > 0) {
@@ -803,6 +847,8 @@ export default function useFileManager({
 
     setFiles((prev) => prev.filter((f) => f.id !== fileId));
     brokerPagesRestoredRef.current.delete(fileId);
+    // 清理 IndexedDB 中的 PDF binary
+    deletePdfBlob(fileId);
 
     // 如果刪的是目前顯示的檔案，切換到另一個
     if (fileId === activeFileIdRef.current) {
@@ -817,6 +863,12 @@ export default function useFileManager({
         pdfDocRef.current = null;
       }
     }
+
+    // 立即存檔 session（不等 debounce），setTimeout(0) 確保 React state 已更新
+    setTimeout(() => {
+      if (saveTimerRef.current) { clearTimeout(saveTimerRef.current); saveTimerRef.current = null; }
+      saveSession(activeFileIdRef.current, filesRef.current);
+    }, 0);
 
     const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
     console.log(`[useFileManager][${ts}] 🗑️ Removed file: ${file.name}`);
@@ -844,6 +896,9 @@ export default function useFileManager({
     setActiveFileId(null);
     pdfDocRef.current = null;
     brokerPagesRestoredRef.current.clear();
+    // 清空 IndexedDB + 取消 pending debounce timer（避免舊資料被重新寫入）
+    clearAllPersistence();
+    if (saveTimerRef.current) { clearTimeout(saveTimerRef.current); saveTimerRef.current = null; }
 
     const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
     console.log(`[useFileManager][${ts}] 🗑️ Cleared all files`);

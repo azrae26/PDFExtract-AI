@@ -11,6 +11,7 @@
 - **文字提取**：左側面板按頁碼+順序整理所有提取文字，支援一鍵複製
 - **Hover 互動**：左側文字與中間框互相連動高亮
 - **自訂 Prompt**：右側可編輯 Prompt，修改後按「重新分析」即可重跑
+- **狀態持久化**：檔案列表和分析結果自動存入 IndexedDB，重新整理後完整恢復
 
 ## 技術棧
 
@@ -39,10 +40,17 @@ src/
     PdfViewer.tsx             — 中間面板：PDF 顯示 + bounding boxes
     BoundingBox.tsx           — 可拖動/可 resize 的標註框
     TextPanel.tsx             — 右側面板：提取文字 + hover 互動
+  hooks/
+    useFileManager.ts         — 多檔案生命週期 Hook（含 IndexedDB 持久化）
+    useAnalysis.ts            — 分析控制 Hook
+    usePanelResize.ts         — 面板 resize Hook
+    useRegionRecognize.ts     — 雙擊識別 Hook
+    analysisHelpers.ts        — 純函式工具
   lib/
     types.ts                  — TypeScript 型別定義
     constants.ts              — 預設 Prompt、顏色配置等常數
     pdfTextExtractCore.ts     — PDF 文字提取純演算法核心（零依賴，前端+debug共用）
+    persistence.ts            — IndexedDB 狀態持久化（PDF binary + 分析結果）
 ```
 
 ## 快速開始
