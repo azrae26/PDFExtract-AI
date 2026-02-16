@@ -184,7 +184,20 @@ export async function mergePageResult(
     updateFileReport(targetFileId, result.report);
   }
 
-  if (!result.hasAnalysis || result.regions.length === 0) return;
+  if (!result.hasAnalysis || result.regions.length === 0) {
+    // 即使沒有區域，也在 pageRegions 標記該頁已完成（空陣列）
+    // 這樣「繼續分析」才能知道哪些頁面已跑過，不需重跑
+    if (isSessionValid(sessionId)) {
+      updateFileRegions(targetFileId, (prev) => {
+        const updated = new Map(prev);
+        if (!updated.has(pageNum)) {
+          updated.set(pageNum, []);
+        }
+        return updated;
+      });
+    }
+    return;
+  }
   if (!isSessionValid(sessionId)) return;
 
   let regionsWithText = result.regions;

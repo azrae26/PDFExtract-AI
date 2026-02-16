@@ -128,9 +128,10 @@ export default function useAnalysis({
       concurrency: number,
       targetFileId: string,
       fileUrl: string,
-      getNextFile?: () => Promise<{ fileId: string; url: string; totalPages: number; effectiveSkip?: number } | null>,
+      getNextFile?: () => Promise<{ fileId: string; url: string; totalPages: number; effectiveSkip?: number; alreadyCompletedPages?: Set<number> } | null>,
       onFileComplete?: (fileId: string, error?: boolean) => void,
       effectiveSkip?: number,
+      alreadyCompletedPages?: Set<number>,
     ) => {
       // 記錄分析目標檔案 ID（primary file）
       analysisFileIdRef.current = targetFileId;
@@ -138,8 +139,12 @@ export default function useAnalysis({
       // 遞增 session，讓舊的非同步操作全部失效
       const sessionId = ++analysisSessionRef.current;
 
+      // 計算需要跑的頁數（扣除已完成的）
+      const alreadyDoneCount = alreadyCompletedPages?.size || 0;
+      const pagesToRun = totalPages - alreadyDoneCount;
+
       const timestamp = new Date().toLocaleTimeString('en-US', { hour12: false });
-      console.log(`[useAnalysis][${timestamp}] 🚀 Starting analysis (session=${sessionId}, file=${targetFileId}) of ${totalPages} pages with concurrency=${concurrency} (model: ${modelId})...`);
+      console.log(`[useAnalysis][${timestamp}] 🚀 Starting analysis (session=${sessionId}, file=${targetFileId}) of ${totalPages} pages (${alreadyDoneCount} already done, ${pagesToRun} remaining) with concurrency=${concurrency} (model: ${modelId})...`);
 
       abortRef.current = false;
       stoppedByUserRef.current = false;
@@ -151,13 +156,23 @@ export default function useAnalysis({
       setBatchIsAnalyzing(true);
       setError(null);
 
+      // 如果所有頁面都已完成，直接標記完成不啟動 pool
+      if (pagesToRun <= 0) {
+        const ts2 = new Date().toLocaleTimeString('en-US', { hour12: false });
+        console.log(`[useAnalysis][${ts2}] ✅ All pages already completed for ${targetFileId}, skipping analysis`);
+        if (onFileComplete) onFileComplete(targetFileId);
+        setBatchIsAnalyzing(false);
+        analysisFileIdRef.current = null;
+        return;
+      }
+
       // === 跨檔案 worker pool 資料結構 ===
       const taskQueue: { fileId: string; pageNum: number }[] = [];
       const pdfDocMap = new Map<string, pdfjs.PDFDocumentProxy>();
       const totalPerFile = new Map<string, number>();
       const completedPerFile = new Map<string, number>();
       const fileCompletedSet = new Set<string>(); // 避免重複觸發 onFileComplete
-      let globalTotal = totalPages;
+      let globalTotal = pagesToRun;
       let globalCompleted = 0;
 
       // === 載入第一個檔案 ===
@@ -179,34 +194,45 @@ export default function useAnalysis({
       }
 
       pdfDocMap.set(targetFileId, firstDoc);
-      totalPerFile.set(targetFileId, totalPages);
+      totalPerFile.set(targetFileId, pagesToRun);
       completedPerFile.set(targetFileId, 0);
 
       // 設定 per-file 分析進度（寫入 FileEntry）
-      updateFileProgress(targetFileId, { analysisPages: totalPages, completedPages: 0 });
+      // 繼續分析時：analysisPages = 總頁數，completedPages = 已完成數
+      updateFileProgress(targetFileId, { analysisPages: totalPages, completedPages: alreadyDoneCount });
 
-      // 清除非 userModified 的 regions，保留手動修改/新增的
+      // 清除未完成頁面的非 userModified regions，保留已完成頁面的所有 regions
       updateFileRegions(targetFileId, (prev) => {
         const kept = new Map<number, Region[]>();
         prev.forEach((regions, page) => {
-          const userRegions = regions.filter((r) => r.userModified);
-          if (userRegions.length > 0) kept.set(page, userRegions);
+          if (alreadyCompletedPages?.has(page)) {
+            // 已完成頁面：保留所有 regions
+            kept.set(page, regions);
+          } else {
+            // 未完成頁面：只保留 userModified
+            const userRegions = regions.filter((r) => r.userModified);
+            if (userRegions.length > 0) kept.set(page, userRegions);
+          }
         });
         return kept;
       });
 
-      // 填入第一個檔案的 tasks
+      // 填入第一個檔案的 tasks（跳過已完成的頁面）
+      const queuedPages = new Set<number>();
       for (let p = 1; p <= totalPages; p++) {
-        taskQueue.push({ fileId: targetFileId, pageNum: p });
+        if (!alreadyCompletedPages?.has(p)) {
+          taskQueue.push({ fileId: targetFileId, pageNum: p });
+          queuedPages.add(p);
+        }
       }
 
-      // 初始化排隊頁面集合（per-file）
+      // 初始化排隊頁面集合（per-file，只包含未完成的頁面）
       setQueuedPagesMap((prev) => {
         const nm = new Map(prev);
-        nm.set(targetFileId, new Set(Array.from({ length: totalPages }, (_, i) => i + 1)));
+        nm.set(targetFileId, queuedPages);
         return nm;
       });
-      setAnalysisProgress({ current: 0, total: totalPages });
+      setAnalysisProgress({ current: 0, total: pagesToRun });
 
       // === 動態插入頁面到佇列（供券商校正後恢復被省略的頁面）===
       addPagesToQueueRef.current = (fileId: string, pageNums: number[]) => {
@@ -298,8 +324,18 @@ export default function useAnalysis({
               return false;
             }
 
+            // 計算此檔案需要跑的頁數（扣除已完成的）
+            const nextAlreadyDone = next.alreadyCompletedPages?.size || 0;
+            const nextPagesToRun = next.totalPages - nextAlreadyDone;
+
             const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
-            console.log(`[useAnalysis][${ts}] 📂 Worker pool pulling next file: ${next.fileId} (${next.totalPages} pages)`);
+            console.log(`[useAnalysis][${ts}] 📂 Worker pool pulling next file: ${next.fileId} (${next.totalPages} pages, ${nextAlreadyDone} already done, ${nextPagesToRun} remaining)`);
+
+            // 所有頁面都已完成，直接標記完成
+            if (nextPagesToRun <= 0) {
+              handleFileDone(next.fileId, false);
+              return false;
+            }
 
             // 載入新檔案的 pdfDoc
             let newDoc: pdfjs.PDFDocumentProxy;
@@ -319,40 +355,49 @@ export default function useAnalysis({
             }
 
             pdfDocMap.set(next.fileId, newDoc);
-            totalPerFile.set(next.fileId, next.totalPages);
+            totalPerFile.set(next.fileId, nextPagesToRun);
             completedPerFile.set(next.fileId, 0);
 
             // 設定 per-file 分析進度（寫入 FileEntry）
-            updateFileProgress(next.fileId, { analysisPages: next.totalPages, completedPages: 0 });
+            // 繼續分析時：analysisPages = 總頁數，completedPages = 已完成數
+            updateFileProgress(next.fileId, { analysisPages: next.totalPages, completedPages: nextAlreadyDone });
 
             // 記錄此檔案分析啟動時的 effectiveSkip
             if (next.effectiveSkip !== undefined) {
               initialSkipRef.current.set(next.fileId, next.effectiveSkip);
             }
 
-            // 清除非 userModified 的 regions
+            // 清除未完成頁面的非 userModified regions，保留已完成頁面的所有 regions
             updateFileRegions(next.fileId, (prev) => {
               const kept = new Map<number, Region[]>();
               prev.forEach((regions, page) => {
-                const userRegions = regions.filter((r) => r.userModified);
-                if (userRegions.length > 0) kept.set(page, userRegions);
+                if (next.alreadyCompletedPages?.has(page)) {
+                  kept.set(page, regions);
+                } else {
+                  const userRegions = regions.filter((r) => r.userModified);
+                  if (userRegions.length > 0) kept.set(page, userRegions);
+                }
               });
               return kept;
             });
 
-            // 填入新 tasks
+            // 填入新 tasks（跳過已完成的頁面）
+            const nextQueuedPages = new Set<number>();
             for (let p = 1; p <= next.totalPages; p++) {
-              taskQueue.push({ fileId: next.fileId, pageNum: p });
+              if (!next.alreadyCompletedPages?.has(p)) {
+                taskQueue.push({ fileId: next.fileId, pageNum: p });
+                nextQueuedPages.add(p);
+              }
             }
 
             // 更新全域進度
-            globalTotal += next.totalPages;
+            globalTotal += nextPagesToRun;
             setAnalysisProgress((prev) => ({ ...prev, total: globalTotal }));
 
-            // 更新 queuedPagesMap（per-file）
+            // 更新 queuedPagesMap（per-file，只包含未完成的頁面）
             setQueuedPagesMap((prev) => {
               const nm = new Map(prev);
-              nm.set(next.fileId, new Set(Array.from({ length: next.totalPages }, (_, i) => i + 1)));
+              nm.set(next.fileId, nextQueuedPages);
               return nm;
             });
 
@@ -596,6 +641,9 @@ export default function useAnalysis({
         updateFileProgress(targetFileId, { analysisDelta: 1 });
         const ts0 = new Date().toLocaleTimeString('en-US', { hour12: false });
         console.log(`[useAnalysis][${ts0}] ⏭️ Page ${pageNum} pulled from queue for immediate re-analysis.`);
+      } else {
+        // 獨立重跑（頁面已完成）：per-file 分析總數 +1（完成時會 +1 completedPages）
+        updateFileProgress(targetFileId, { analysisDelta: 1 });
       }
 
       const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
@@ -631,10 +679,8 @@ export default function useAnalysis({
         await mergePageResult(pageNum, result, pdfDoc, sessionId, isSessionValid, targetFileId, updateFileRegions, updateFileReport);
       }
 
-      // 如果此頁原本在佇列中（首次分析，非重跑），更新 per-file 已完成頁數
-      if (wasInQueue) {
-        updateFileProgress(targetFileId, { completedDelta: 1 });
-      }
+      // 更新 per-file 已完成頁數（無論是從佇列拉出或獨立重跑，都要同步進度到列表與設定面板）
+      updateFileProgress(targetFileId, { completedDelta: 1 });
 
       // 只有當所有飛行中的頁面都完成時才停止分析狀態
       inFlightPageRef.current--;

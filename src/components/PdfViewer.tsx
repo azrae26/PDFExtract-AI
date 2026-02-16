@@ -417,16 +417,35 @@ export default function PdfViewer({
                         </svg>
                       </button>
                     ) : (
-                      /* 正常狀態：可點擊重跑 */
+                      /* 正常狀態：可點擊重跑，顏色反映頁面狀態 */
+                      (() => {
+                        const hasEntry = pageRegions.has(pageNum);
+                        const pageRegs = regions; // 已在上方取得
+                        const hasAiRegions = hasEntry && (pageRegs.length === 0 || pageRegs.some((r) => !r.userModified));
+                        const hasOnlyUserRegions = hasEntry && pageRegs.length > 0 && pageRegs.every((r) => r.userModified);
+                        // 綠=AI已跑完, 橘=僅手動畫框, 白=未跑過
+                        const statusColor = hasAiRegions
+                          ? 'bg-green-200 text-green-700 border-green-400 hover:bg-green-500 hover:text-white hover:border-green-500'
+                          : hasOnlyUserRegions
+                            ? 'bg-amber-200 text-amber-700 border-amber-400 hover:bg-amber-500 hover:text-white hover:border-amber-500'
+                            : 'bg-white text-gray-500 border-gray-200 hover:bg-blue-500 hover:text-white hover:border-blue-500';
+                        const statusTitle = hasAiRegions
+                          ? `第 ${pageNum} 頁（AI 已完成）- 點擊重跑`
+                          : hasOnlyUserRegions
+                            ? `第 ${pageNum} 頁（手動畫框）- 點擊重跑`
+                            : `重新分析第 ${pageNum} 頁`;
+                        return (
                       <button
                         onClick={() => onReanalyzePage(pageNum)}
-                        className="w-9 h-9 rounded-full bg-white text-gray-500 shadow-md border border-gray-200 flex items-center justify-center hover:bg-blue-500 hover:text-white hover:border-blue-500 hover:shadow-lg active:scale-90 transition-all duration-150 cursor-pointer"
-                        title={`重新分析第 ${pageNum} 頁`}
+                        className={`w-9 h-9 rounded-full shadow-md border flex items-center justify-center hover:shadow-lg active:scale-90 transition-all duration-150 cursor-pointer ${statusColor}`}
+                        title={statusTitle}
                       >
                         <svg className="w-4.5 h-4.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
                           <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
                         </svg>
                       </button>
+                        );
+                      })()
                     )}
 
                     {/* 切換校正前/校正後 bbox */}

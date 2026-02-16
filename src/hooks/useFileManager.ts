@@ -276,7 +276,7 @@ export default function useFileManager({
   // === 跨檔案 worker pool 的 getNextFile callback ===
   // 從 files 中找下一個 queued 檔案，標記為 processing，回傳檔案資訊
   // 優先檢查 priorityFileIdRef（重新分析插隊）
-  const getNextFileForPool = useCallback(async (): Promise<{ fileId: string; url: string; totalPages: number; effectiveSkip?: number } | null> => {
+  const getNextFileForPool = useCallback(async (): Promise<{ fileId: string; url: string; totalPages: number; effectiveSkip?: number; alreadyCompletedPages?: Set<number> } | null> => {
     const latestFiles = filesRef.current;
 
     // 優先拉取 priority 檔案
@@ -343,7 +343,19 @@ export default function useFileManager({
       ? brokerSkipMapRef.current[nextQueued.report]
       : skipLastPages;
     const pagesToAnalyze = Math.max(1, pages - effectiveSkip);
-    return { fileId: nextQueued.id, url: nextQueued.url, totalPages: pagesToAnalyze, effectiveSkip };
+
+    // 收集已完成的頁面（pageRegions 中有 entry 的頁碼，包含空陣列＝AI 判斷無區域）
+    const alreadyCompletedPages = new Set<number>();
+    nextQueued.pageRegions.forEach((_regions, pageNum) => {
+      if (pageNum >= 1 && pageNum <= pagesToAnalyze) {
+        alreadyCompletedPages.add(pageNum);
+      }
+    });
+
+    return {
+      fileId: nextQueued.id, url: nextQueued.url, totalPages: pagesToAnalyze, effectiveSkip,
+      alreadyCompletedPages: alreadyCompletedPages.size > 0 ? alreadyCompletedPages : undefined,
+    };
   }, [skipLastPages]);
 
   // === 跨檔案 worker pool 的 onFileComplete callback ===
@@ -559,6 +571,17 @@ export default function useFileManager({
       )
     );
 
+    // 收集已完成的頁面（pageRegions 中有 entry 的頁碼，包含空陣列＝AI 判斷無區域）
+    const buildCompletedPages = (file: FileEntry, pagesToAnalyze: number): Set<number> | undefined => {
+      const completed = new Set<number>();
+      file.pageRegions.forEach((_regions, pageNum) => {
+        if (pageNum >= 1 && pageNum <= pagesToAnalyze) {
+          completed.add(pageNum);
+        }
+      });
+      return completed.size > 0 ? completed : undefined;
+    };
+
     // 如果 PDF 已在預載快取中，直接啟動分析（不等 handleDocumentLoadForFile）
     const cachedDoc = pdfDocCacheRef.current.get(nextQueued.id);
     if (cachedDoc) {
@@ -568,9 +591,10 @@ export default function useFileManager({
         ? brokerSkipMapRef.current[nextQueued.report]
         : skipLastPages;
       const pagesToAnalyze = Math.max(1, pages - effectiveSkip2);
+      const completedPages = buildCompletedPages(nextQueued, pagesToAnalyze);
       const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
-      console.log(`[useFileManager][${ts}] 🚀 PDF already cached, starting analysis directly for ${nextQueued.id}`);
-      analyzeAllPages(pagesToAnalyze, prompt, model, batchSize, nextQueued.id, nextQueued.url, getNextFileForPool, handlePoolFileComplete, effectiveSkip2);
+      console.log(`[useFileManager][${ts}] 🚀 PDF already cached, starting analysis directly for ${nextQueued.id} (${completedPages?.size || 0} pages already done)`);
+      analyzeAllPages(pagesToAnalyze, prompt, model, batchSize, nextQueued.id, nextQueued.url, getNextFileForPool, handlePoolFileComplete, effectiveSkip2, completedPages);
     }
     // else: PdfViewer 尚未載入，等 handleDocumentLoadForFile 觸發
   }, [skipLastPages, prompt, model, batchSize, analyzeAllPages, getNextFileForPool, handlePoolFileComplete]);
@@ -692,7 +716,14 @@ export default function useFileManager({
           ? brokerSkipMapRef.current[currentFile.report]
           : skipLastPages;
         const pagesToAnalyze = Math.max(1, pdf.numPages - effectiveSkipDoc);
-        analyzeAllPages(pagesToAnalyze, prompt, model, batchSize, fileId, currentFile.url, getNextFileForPool, handlePoolFileComplete, effectiveSkipDoc);
+        // 收集已完成的頁面（繼續分析時跳過）
+        const completedPages = new Set<number>();
+        currentFile.pageRegions.forEach((_regions, pageNum) => {
+          if (pageNum >= 1 && pageNum <= pagesToAnalyze) {
+            completedPages.add(pageNum);
+          }
+        });
+        analyzeAllPages(pagesToAnalyze, prompt, model, batchSize, fileId, currentFile.url, getNextFileForPool, handlePoolFileComplete, effectiveSkipDoc, completedPages.size > 0 ? completedPages : undefined);
       }
     },
     [prompt, model, batchSize, skipLastPages, analyzeAllPages, getNextFileForPool, handlePoolFileComplete]

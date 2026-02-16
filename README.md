@@ -42,6 +42,7 @@ src/
   lib/
     types.ts                  — TypeScript 型別定義
     constants.ts              — 預設 Prompt、顏色配置等常數
+    pdfTextExtractCore.ts     — PDF 文字提取純演算法核心（零依賴，前端+debug共用）
 ```
 
 ## 快速開始
@@ -84,6 +85,29 @@ npm run dev
 - Gemini API 回傳歸一化座標（0~1000）
 - `(0, 0)` = 圖片左上角，`(1000, 1000)` = 圖片右下角
 - 系統自動將歸一化座標轉換為 PDF 顯示的像素座標
+
+## Debug 工具
+
+`pdf/debug-pdf.ts` 提供離線 PDF 文字層診斷，用於排查文字提取問題。
+直接 import `pdfTextExtractCore.ts` 的共用演算法，確保 debug 和主程式邏輯一致，零重複：
+
+```bash
+cd pdfextract-ai/pdf
+
+# 顯示所有文字項 + 自適應閾值分析 + 危險行距
+npx tsx debug-pdf.ts items <file> [page]
+
+# 顯示行分組結果（自適應閾值 + Y重疊合併 + 碎片重組）
+npx tsx debug-pdf.ts lines <file> [page]
+
+# 模擬完整提取流程：snap → resolve → enforce → descender → 多欄偵測 → 文字
+npx tsx debug-pdf.ts extract <file> <page> <x1,y1,x2,y2> [x1,y1,x2,y2 ...]
+
+# 批次掃描目錄下所有 PDF
+npx tsx debug-pdf.ts batch [dir] [page]
+```
+
+檔名支援 glob 模式（如 `5274*`），解決 PowerShell 中文編碼問題。
 
 ## 注意事項
 
