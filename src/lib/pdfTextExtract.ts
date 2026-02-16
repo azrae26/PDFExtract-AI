@@ -97,6 +97,9 @@ const PUA_CHAR_MAP: Record<number, string> = {
   0xF0E8: '➤',  // Wingdings: 箭頭
 };
 
+/** Debug log 用時間戳 */
+const _ts = () => new Date().toLocaleTimeString('en-US', { hour12: false });
+
 /** 將 PUA 字元替換為可顯示的標準符號，未登錄的 PUA 字元以 ● 代替 */
 function sanitizePuaChars(text: string): string {
   // 快速路徑：沒有 PUA 字元就直接回傳
@@ -278,6 +281,7 @@ interface Hit {
   normX: number;
   normBaseline: number;
   normRight: number;
+  normY: number;        // top 座標（用於 Y 重疊行分組，處理粗體 baseline 偏移）
 }
 
 /**
@@ -422,8 +426,6 @@ function testSeparator(
  * @returns 按欄分組的 hits 陣列，單欄時回傳 [hits]
  */
 function splitIntoColumns(hits: Hit[]): Hit[][] {
-  const _ts = () => new Date().toLocaleTimeString('en-US', { hour12: false });
-
   if (hits.length <= 1) return [hits];
 
   // === Step 1: 按 baseline 分行 ===
@@ -674,16 +676,16 @@ function formatColumnText(hits: Hit[]): string {
       }
       if (minSpacing > 3 && minSpacing < SAME_LINE_THRESHOLD) {
         lineThreshold = Math.max(3, minSpacing * 0.7);
-        const _ts = () => new Date().toLocaleTimeString('en-US', { hour12: false });
         console.log(
           `[pdfTextExtract][${_ts()}] 🎯 自適應行閾值: 穩定行=${stableClusters.length}` +
           `, 最小行距=${minSpacing.toFixed(1)}, 閾值=${lineThreshold.toFixed(1)}` +
           ` (原=${SAME_LINE_THRESHOLD})`
         );
       }
-    } else if (microClusters.length >= 3) {
-      // Fallback：每行只有 1 個 text item（count 全為 1）→ 無穩定行
-      // 用微聚類間距的中位數估算行距，避免超連結等離群值影響
+    }
+    // Fallback：穩定聚類沒有產生有效閾值時（間距太大或穩定聚類不足），
+    // 用所有微聚類間距的中位數估算行距
+    if (lineThreshold === SAME_LINE_THRESHOLD && microClusters.length >= 3) {
       const spacings: number[] = [];
       for (let i = 1; i < microClusters.length; i++) {
         spacings.push(microClusters[i].baseline - microClusters[i - 1].baseline);
@@ -692,7 +694,6 @@ function formatColumnText(hits: Hit[]): string {
       const medianSpacing = spacings[Math.floor(spacings.length / 2)];
       if (medianSpacing > 3 && medianSpacing < SAME_LINE_THRESHOLD) {
         lineThreshold = Math.max(3, medianSpacing * 0.7);
-        const _ts = () => new Date().toLocaleTimeString('en-US', { hour12: false });
         console.log(
           `[pdfTextExtract][${_ts()}] 🎯 自適應行閾值(fallback): 微聚類=${microClusters.length}` +
           `, 中位數行距=${medianSpacing.toFixed(1)}, 閾值=${lineThreshold.toFixed(1)}` +
@@ -705,13 +706,43 @@ function formatColumnText(hits: Hit[]): string {
   // === Step 3: 按自適應閾值聚類分行 ===
   // 用「排序→順序聚類」代替直接帶 threshold 的 sort，避免不可傳遞性：
   // 超連結 (report) 等異字型的 baseline 微偏 → 直接 sort 時相鄰行 items 混合 → 行交錯
+  // 輔以 Y 重疊檢查：粗體/不同字型的 baseline 偏移超出閾值時，
+  // 若 item 的 [normY, normBaseline] 與當前行 coreYRange 有重疊 → 仍視為同行
   const lines: Hit[][] = [[sorted[0]]];
+  // coreYRange：僅由 baseline 近接合併的 items 定義（Y-overlap 合併不更新）
+  // → 避免連鎖擴張（A 拉進 B，B 的 Y 範圍又拉進下一行 C）
+  const coreYRanges: { top: number; bottom: number }[] = [
+    { top: sorted[0].normY, bottom: sorted[0].normBaseline }
+  ];
+
   for (let i = 1; i < sorted.length; i++) {
     const lastLine = lines[lines.length - 1];
+    const coreYRange = coreYRanges[coreYRanges.length - 1];
+
     if (sorted[i].normBaseline - lastLine[0].normBaseline < lineThreshold) {
+      // 同行（baseline 近接）
       lastLine.push(sorted[i]);
+      coreYRange.top = Math.min(coreYRange.top, sorted[i].normY);
+      coreYRange.bottom = Math.max(coreYRange.bottom, sorted[i].normBaseline);
     } else {
-      lines.push([sorted[i]]);
+      // baseline 超出閾值 → 檢查 Y 範圍是否與當前行 core 重疊
+      const overlapTop = Math.max(coreYRange.top, sorted[i].normY);
+      const overlapBottom = Math.min(coreYRange.bottom, sorted[i].normBaseline);
+
+      if (overlapBottom > overlapTop) {
+        // Y 重疊 → 同一視覺行（粗體 + 正文等 baseline 偏移情境），不更新 coreYRange
+        console.log(
+          `[pdfTextExtract][${_ts()}] 🔀 Y-overlap 行合併: blDiff=` +
+          `${(sorted[i].normBaseline - lastLine[0].normBaseline).toFixed(1)}` +
+          ` > threshold=${lineThreshold.toFixed(1)}, Y overlap=${(overlapBottom - overlapTop).toFixed(1)}` +
+          ` → "${sorted[i].str.substring(0, 30)}"`
+        );
+        lastLine.push(sorted[i]);
+      } else {
+        // 不同行
+        lines.push([sorted[i]]);
+        coreYRanges.push({ top: sorted[i].normY, bottom: sorted[i].normBaseline });
+      }
     }
   }
 
@@ -760,7 +791,6 @@ function formatColumnText(hits: Hit[]): string {
           if (combinedSpan < Math.max(lineXInfos[i].span, lineXInfos[j].span) * COMPLEMENT_RATIO) continue;
 
           // 合併 j 到 i
-          const _ts = () => new Date().toLocaleTimeString('en-US', { hour12: false });
           console.log(
             `[pdfTextExtract][${_ts()}] 🔗 行碎片重組: 合併行[${i}](X=${Math.round(lineXInfos[i].minX)}-${Math.round(lineXInfos[i].maxX)})` +
             ` + 行[${j}](X=${Math.round(lineXInfos[j].minX)}-${Math.round(lineXInfos[j].maxX)})` +
@@ -778,26 +808,32 @@ function formatColumnText(hits: Hit[]): string {
     }
   }
 
-  // === Step 4: 計算行距中位數（段落間距偵測） ===
-  const PARA_GAP_RATIO = 1.4; // 行距 > 正常行距 × 此倍數 → 段落分隔
+  // === Step 4: 計算行距（段落間距偵測 — 局部自適應） ===
+  // 用局部窗口 lower 30th percentile（±PARA_WINDOW 行距）取代全域中位數，
+  // 抓出區域內的「基本行距」（續行間距），讓 bullet 間距 / 段落間距能正確突出
+  const PARA_GAP_RATIO = 1.3; // 行距 > 局部基本行距 × 此倍數 → 段落分隔
+  const PARA_WINDOW = 3; // 局部窗口：±3 個行距（最多 7 個值取 lower percentile）
+  const lineGaps: number[] = []; // 保留原始順序，供局部窗口使用
   let medianLineGap = 0;
-  if (lines.length >= 3) {
-    const gaps: number[] = [];
-    for (let i = 1; i < lines.length; i++) {
-      gaps.push(lines[i][0].normBaseline - lines[i - 1][0].normBaseline);
-    }
-    gaps.sort((a, b) => a - b);
-    medianLineGap = gaps[Math.floor(gaps.length / 2)];
 
-    const _ts = () => new Date().toLocaleTimeString('en-US', { hour12: false });
+  for (let i = 1; i < lines.length; i++) {
+    lineGaps.push(lines[i][0].normBaseline - lines[i - 1][0].normBaseline);
+  }
+
+  if (lineGaps.length >= 2) {
+    const sortedGaps = [...lineGaps].sort((a, b) => a - b);
+    medianLineGap = sortedGaps[Math.floor(sortedGaps.length / 2)];
+
     console.log(
-      `[pdfTextExtract][${_ts()}] 📏 行距分析: 行數=${lines.length}, 中位數=${medianLineGap.toFixed(1)}` +
-      `, 閾值=${(medianLineGap * PARA_GAP_RATIO).toFixed(1)}, 各行距=[${gaps.map(g => g.toFixed(1)).join(',')}]`
+      `[pdfTextExtract][${_ts()}] 📏 行距分析: 行數=${lines.length}, 全域中位數=${medianLineGap.toFixed(1)}` +
+      `, 全域閾值=${(medianLineGap * PARA_GAP_RATIO).toFixed(1)}` +
+      `, 模式=${lineGaps.length >= 5 ? '局部自適應(LQ30)' : '全域中位數'}` +
+      `, 各行距=[${lineGaps.map(g => g.toFixed(1)).join(',')}]`
     );
   }
 
   // === Step 5: 逐行拼接文字 ===
-  // 行間：行距 > 中位數 × PARA_GAP_RATIO → 空行（段落分隔），否則換行
+  // 行間：行距 > 局部基本行距 × PARA_GAP_RATIO → 空行（段落分隔），否則換行
   // 行內：間距 > COL_GAP_THRESHOLD → TAB，> SPACE_GAP_THRESHOLD → 空格
   //        gap < WRAPAROUND_THRESHOLD → 回彈偵測（不同行被誤歸同行的安全網）→ 換行
   const COL_GAP_THRESHOLD = 30; // 歸一化單位，約頁面寬度 3%
@@ -808,8 +844,22 @@ function formatColumnText(hits: Hit[]): string {
   for (let li = 0; li < lines.length; li++) {
     // 行間分隔
     if (li > 0) {
-      const lineGap = lines[li][0].normBaseline - lines[li - 1][0].normBaseline;
-      if (medianLineGap > 0 && lineGap > medianLineGap * PARA_GAP_RATIO) {
+      const gapIdx = li - 1;
+      const lineGap = lineGaps[gapIdx];
+
+      // 局部自適應段落偵測：取 ±PARA_WINDOW 範圍內的 lower 30th percentile 作為「基本行距」參考。
+      // 用 lower percentile 而非 median：在 bullet list 區域，bullet 間距和續行間距混合，
+      // median 會被 bullet 間距拉高，導致 bullet 間距不突出；
+      // lower percentile 抓到續行的小間距（基本行距），讓 bullet 間距能正確突出為段落分隔
+      let paraRef = medianLineGap; // 預設用全域中位數
+      if (lineGaps.length >= 5) {
+        const wStart = Math.max(0, gapIdx - PARA_WINDOW);
+        const wEnd = Math.min(lineGaps.length - 1, gapIdx + PARA_WINDOW);
+        const windowGaps = lineGaps.slice(wStart, wEnd + 1).sort((a, b) => a - b);
+        paraRef = windowGaps[Math.floor(windowGaps.length * 0.3)];
+      }
+
+      if (paraRef > 0 && lineGap > paraRef * PARA_GAP_RATIO) {
         text += '\n\n'; // 段落分隔
       } else {
         text += '\n';
@@ -855,7 +905,7 @@ function extractTextFromBbox(
   for (const ti of textItems) {
     const tiRight = ti.normX + ti.normW;
     if (ti.normX < x2 && tiRight > x1 && ti.normY < y2 && ti.normBaseline > y1) {
-      hits.push({ str: ti.str, normX: ti.normX, normBaseline: ti.normBaseline, normRight: tiRight });
+      hits.push({ str: ti.str, normX: ti.normX, normBaseline: ti.normBaseline, normRight: tiRight, normY: ti.normY });
     }
   }
 
@@ -863,9 +913,8 @@ function extractTextFromBbox(
   if (hits.length > 0) {
     const hMinX = Math.min(...hits.map(h => h.normX));
     const hMaxX = Math.max(...hits.map(h => h.normRight));
-    const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
     console.log(
-      `[pdfTextExtract][${ts}] 🔍 extractTextFromBbox: bbox=[${Math.round(x1)},${Math.round(y1)},${Math.round(x2)},${Math.round(y2)}]` +
+      `[pdfTextExtract][${_ts()}] 🔍 extractTextFromBbox: bbox=[${Math.round(x1)},${Math.round(y1)},${Math.round(x2)},${Math.round(y2)}]` +
       `, hits=${hits.length}, X range=[${Math.round(hMinX)}-${Math.round(hMaxX)}]`
     );
   }
@@ -944,7 +993,6 @@ export async function extractTextForRegions(
     const xChanged = ox1 !== finalBbox[0] || ox2 !== finalBbox[2];
     const yChanged = oy1 !== finalBbox[1] || oy2 !== finalBbox[3];
     if (xChanged || yChanged) {
-      const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
       const parts: string[] = [];
       if (xChanged) {
         parts.push(`x1:${Math.round(ox1)}→${Math.round(finalBbox[0])}, x2:${Math.round(ox2)}→${Math.round(finalBbox[2])}`);
@@ -952,7 +1000,7 @@ export async function extractTextForRegions(
       if (yChanged) {
         parts.push(`y1:${Math.round(oy1)}→${Math.round(finalBbox[1])}, y2:${Math.round(oy2)}→${Math.round(finalBbox[3])}`);
       }
-      console.log(`[pdfTextExtract][${ts}] 🔧 Region "${region.label}" bbox adjusted: ${parts.join(' | ')}`);
+      console.log(`[pdfTextExtract][${_ts()}] 🔧 Region "${region.label}" bbox adjusted: ${parts.join(' | ')}`);
     }
 
     return { ...region, bbox: finalBbox, text };
