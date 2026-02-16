@@ -114,14 +114,13 @@ function sanitizePuaChars(text: string): string {
  * 自動校正 bbox 邊界
  * - 水平方向：重疊比例 >= 50% 才擴展（避免吃到相鄰區塊）
  * - 垂直方向：只要框碰到該行就補足到完整行高（任何重疊即擴展）
+ * - 降部補償不在此處加入 — 由外層在 resolve/enforce 之後獨立處理，避免汙染後續校正階段的座標
  */
 function snapBboxToText(
   bbox: [number, number, number, number],
   textItems: NormTextItem[],
 ): [number, number, number, number] {
   let [x1, y1, x2, y2] = bbox;
-  // 追蹤決定 y2 底部邊緣的文字項高度（用於計算降部補償）
-  let bottomEdgeH = 0;
 
   // 迭代擴展 — 只納入重疊比例 >= 50% 的文字項目
   let changed = true;
@@ -134,11 +133,16 @@ function snapBboxToText(
       const tiBottom = ti.normY + ti.normH;
 
       // 計算 X、Y 方向的重疊
+      // 交集判定時，文字項底部額外加上降部補償：
+      // PDF 的 textItem height = em height（只到 baseline），不含 g/p/q/y 等字母的降部。
+      // 當框的 y1 碰到降部區域（baseline 和視覺底部之間）時，座標上無交集但視覺上有重疊，
+      // 擴展 tiBottom 讓「碰到降部」也觸發自動擴張。
+      const tiBottomForOverlap = tiBottom + ti.normH * DESCENDER_RATIO;
       const overlapLeft = Math.max(ti.normX, x1);
       const overlapRight = Math.min(tiRight, x2);
       const overlapWidth = overlapRight - overlapLeft;
       const overlapTop = Math.max(ti.normY, y1);
-      const overlapBottom = Math.min(tiBottom, y2);
+      const overlapBottom = Math.min(tiBottomForOverlap, y2);
       const overlapHeight = overlapBottom - overlapTop;
 
       if (overlapWidth <= 0 || overlapHeight <= 0) continue; // 無交集
@@ -153,23 +157,30 @@ function snapBboxToText(
       // 垂直方向：只要框碰到該行就補足到完整行高（任何重疊即擴展）
       if (overlapHeight > 0) {
         if (ti.normY < y1) { y1 = ti.normY; changed = true; }
-        if (tiBottom > y2) { y2 = tiBottom; bottomEdgeH = ti.normH; changed = true; }
+        if (tiBottom > y2) { y2 = tiBottom; changed = true; }
       }
     }
-  }
-
-  // 底部降部補償：根據決定 y2 的文字項高度動態計算（而非固定值）
-  // 框間衝突由後續的 resolveOverlappingLines / enforceMinVerticalGap 處理
-  if (bottomEdgeH > 0) {
-    y2 = Math.min(NORMALIZED_MAX, y2 + bottomEdgeH * DESCENDER_RATIO);
   }
 
   return [x1, y1, x2, y2];
 }
 
-/** 把 textItems 按 baseline 座標分行（同一行不同字體大小 baseline 一致，比 top 更準確） */
-function groupIntoLines(textItems: NormTextItem[]): TextLine[] {
-  const sorted = [...textItems].sort((a, b) => a.normBaseline - b.normBaseline);
+/**
+ * 把 textItems 按 baseline 座標分行（同一行不同字體大小 baseline 一致，比 top 更準確）
+ * @param bboxes 可選 — 若提供，只處理與至少一個 bbox 有 X 重疊的文字項，
+ *               過濾掉不在任何 bbox 水平範圍內的右欄/側邊文字，
+ *               避免跨欄文字被合併成同一行而汙染 resolve 的行距判斷
+ */
+function groupIntoLines(textItems: NormTextItem[], bboxes?: [number, number, number, number][]): TextLine[] {
+  // 過濾：只保留與至少一個 bbox 有 X 重疊的文字項
+  const items = bboxes
+    ? textItems.filter(ti => {
+        const tiRight = ti.normX + ti.normW;
+        return bboxes.some(([bx1, , bx2]) => ti.normX < bx2 && tiRight > bx1);
+      })
+    : textItems;
+
+  const sorted = [...items].sort((a, b) => a.normBaseline - b.normBaseline);
   const lines: TextLine[] = [];
 
   for (const ti of sorted) {
@@ -203,7 +214,7 @@ function resolveOverlappingLines(
 ): void {
   if (bboxes.length < 2) return;
 
-  const lines = groupIntoLines(textItems);
+  const lines = groupIntoLines(textItems, bboxes);
 
   for (let li = 0; li < lines.length; li++) {
     const line = lines[li];
@@ -231,6 +242,10 @@ function resolveOverlappingLines(
     coveringIndices.sort((a, b) => bboxes[a][1] - bboxes[b][1]);
     const upperIdx = coveringIndices[0];
     const lowerIdx = coveringIndices[coveringIndices.length - 1];
+
+    // X 重疊檢查：左右不同欄的框不需要解衝突（避免並排框互相退縮）
+    const xOverlap = Math.min(bboxes[upperIdx][2], bboxes[lowerIdx][2]) - Math.max(bboxes[upperIdx][0], bboxes[lowerIdx][0]);
+    if (xOverlap <= 0) continue;
 
     if (gapBelow < gapAbove) {
       // 下方行距小 → 此行屬於下方段落 → 上方框退縮 y2
@@ -272,6 +287,53 @@ function enforceMinVerticalGap(
       bboxes[upperIdx][3] -= half;
       bboxes[lowerIdx][1] += half;
     }
+  }
+}
+
+/**
+ * 降部補償（Phase 2.75）：在 resolve/enforce 之後為每個框的 y2 加上降部空間
+ * - 根據框底邊附近的文字項高度動態計算
+ * - 受限於下方鄰近框的 y1，不會入侵鄰框領地
+ * - 在 snap/resolve/enforce 之後才執行，避免汙染前面階段的座標判斷
+ */
+function applyDescenderCompensation(
+  bboxes: [number, number, number, number][],
+  textItems: NormTextItem[],
+): void {
+  for (let i = 0; i < bboxes.length; i++) {
+    const [bx1, , bx2, by2] = bboxes[i];
+
+    // 找出框底邊附近（baseline 在 y2 附近）的文字項，取最大高度
+    let bottomEdgeH = 0;
+    for (const ti of textItems) {
+      const tiRight = ti.normX + ti.normW;
+      const tiBaseline = ti.normY + ti.normH;
+      // 文字項需在框的 X 範圍內，且 baseline 接近 y2（差距 < 同行閾值）
+      if (ti.normX < bx2 && tiRight > bx1 && Math.abs(tiBaseline - by2) < SAME_LINE_THRESHOLD) {
+        bottomEdgeH = Math.max(bottomEdgeH, ti.normH);
+      }
+    }
+
+    if (bottomEdgeH <= 0) continue;
+
+    const descenderAmount = bottomEdgeH * DESCENDER_RATIO;
+
+    // 找出 X 有重疊的下方最近框的 y1，降部不超過該邊界
+    let nextY1 = NORMALIZED_MAX;
+    for (let j = 0; j < bboxes.length; j++) {
+      if (j === i) continue;
+      // X 方向有重疊才算鄰近
+      const xOverlap = Math.min(bboxes[i][2], bboxes[j][2]) - Math.max(bboxes[i][0], bboxes[j][0]);
+      if (xOverlap <= 0) continue;
+      // 只看下方框
+      if (bboxes[j][1] > by2) {
+        nextY1 = Math.min(nextY1, bboxes[j][1]);
+      }
+    }
+
+    // 降部補償不超過到下方框的距離（保留 MIN_VERTICAL_GAP）
+    const maxY2 = nextY1 - MIN_VERTICAL_GAP;
+    bboxes[i][3] = Math.min(maxY2, by2 + descenderAmount);
   }
 }
 
@@ -983,6 +1045,9 @@ export async function extractTextForRegions(
   // === Phase 2.5: 保證框間最小垂直間距 ===
   enforceMinVerticalGap(snappedBboxes);
 
+  // === Phase 2.75: 降部補償（在 resolve/enforce 之後，避免汙染前面的座標判斷） ===
+  applyDescenderCompensation(snappedBboxes, textItems);
+
   // === Phase 3: 提取文字 + 組裝結果 ===
   return regions.map((region, i) => {
     const finalBbox = snappedBboxes[i];
@@ -1003,6 +1068,6 @@ export async function extractTextForRegions(
       console.log(`[pdfTextExtract][${_ts()}] 🔧 Region "${region.label}" bbox adjusted: ${parts.join(' | ')}`);
     }
 
-    return { ...region, bbox: finalBbox, text };
+    return { ...region, bbox: finalBbox, originalBbox: region.bbox, text };
   });
 }

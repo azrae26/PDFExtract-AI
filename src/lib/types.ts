@@ -14,6 +14,8 @@ export interface Region {
   text: string;
   /** 是否被使用者手動修改/新增（API 回傳時不覆蓋） */
   userModified?: boolean;
+  /** AI 原始 bbox（校正前），用於切換比較 */
+  originalBbox?: [number, number, number, number];
 }
 
 /** 單頁分析結果 */

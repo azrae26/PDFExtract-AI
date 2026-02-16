@@ -47,6 +47,10 @@ interface PdfViewerProps {
   onCancelQueuedPage: (page: number) => void;
   /** 刪除某頁的所有框 */
   onRemoveAllRegions: (page: number) => void;
+  /** 是否顯示校正前的 bbox */
+  showOriginalBbox: boolean;
+  /** 切換校正前/校正後 bbox 顯示 */
+  onToggleOriginalBbox: () => void;
 }
 
 export default function PdfViewer({
@@ -67,6 +71,8 @@ export default function PdfViewer({
   queuedPages,
   onCancelQueuedPage,
   onRemoveAllRegions,
+  showOriginalBbox,
+  onToggleOriginalBbox,
 }: PdfViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [pageWidth, setPageWidth] = useState(600);
@@ -423,6 +429,23 @@ export default function PdfViewer({
                       </button>
                     )}
 
+                    {/* 切換校正前/校正後 bbox */}
+                    {regions.length > 0 && (
+                      <button
+                        onClick={onToggleOriginalBbox}
+                        className={`w-9 h-9 rounded-full shadow-md border flex items-center justify-center active:scale-90 transition-all duration-150 cursor-pointer ${
+                          showOriginalBbox
+                            ? 'bg-amber-500 text-white border-amber-500 hover:bg-amber-600 hover:border-amber-600'
+                            : 'bg-white text-gray-500 border-gray-200 hover:bg-amber-500 hover:text-white hover:border-amber-500 hover:shadow-lg'
+                        }`}
+                        title={showOriginalBbox ? '目前顯示：校正前 bbox（點擊切回校正後）' : '切換顯示校正前 bbox'}
+                      >
+                        <svg className="w-4.5 h-4.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
+                        </svg>
+                      </button>
+                    )}
+
                     {/* 刪除該頁所有框 */}
                     {regions.length > 0 && (
                       <button
@@ -484,6 +507,7 @@ export default function PdfViewer({
                             onUpdate={(newBbox) => onRegionUpdate(pageNum, region.id, newBbox)}
                             onRemove={() => onRegionRemove(pageNum, region.id)}
                             onDoubleClick={() => onRegionDoubleClick(pageNum, region.id)}
+                            showOriginalBbox={showOriginalBbox}
                           />
                         );
                       })}

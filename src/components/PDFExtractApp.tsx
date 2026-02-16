@@ -94,6 +94,8 @@ export default function PDFExtractApp() {
   const [currentPage, setCurrentPage] = useState(1);
   const [hoveredRegionId, setHoveredRegionId] = useState<string | null>(null);
   const [scrollTarget, setScrollTarget] = useState<string | null>(null);
+  /** 切換顯示校正前/校正後 bbox（全域，跨檔案共享） */
+  const [showOriginalBbox, setShowOriginalBbox] = useState(false);
 
   // === useFileManager Hook（檔案生命週期 + 分析流程）===
   const {
@@ -594,6 +596,8 @@ export default function PDFExtractApp() {
                 queuedPages={fileQueuedPages}
                 onCancelQueuedPage={(pageNum: number) => cancelQueuedPage(file.id, pageNum)}
                 onRemoveAllRegions={handleRemoveAllRegions}
+                showOriginalBbox={showOriginalBbox}
+                onToggleOriginalBbox={() => setShowOriginalBbox(prev => !prev)}
                 onRegionDoubleClick={(page: number, regionId: number) => {
                   const region = file.pageRegions.get(page)?.find((r) => r.id === regionId);
                   if (region) {

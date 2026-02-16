@@ -426,9 +426,11 @@ export default function useFileManager({
   useEffect(() => {
     if (activeFileId === prevActiveFileIdRef.current) return;
 
-    // 只要有任何檔案正在分析，就不中斷 session（分析結果透過 updateFileRegions 直接寫入 files 陣列）
+    // 只要有任何分析操作正在進行，就不中斷 session（分析結果透過 updateFileRegions 直接寫入 files 陣列）
+    // anyProcessing：批次分析中（file status = processing）
+    // isAnalyzing：單頁重跑 或 雙擊識別 也會設 true，但不改 file status，需額外檢查
     const anyProcessing = filesRef.current.some((f) => f.status === 'processing');
-    if (anyProcessing) {
+    if (anyProcessing || isAnalyzing) {
       const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
       console.log(`[useFileManager][${ts}] 🔄 Switching files while analysis is running, keeping session alive`);
     } else {

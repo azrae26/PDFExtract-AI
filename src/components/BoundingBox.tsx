@@ -30,6 +30,8 @@ interface BoundingBoxProps {
   onRemove: () => void;
   /** 雙擊此 region（截圖送 AI 識別） */
   onDoubleClick: () => void;
+  /** 是否顯示校正前的 bbox */
+  showOriginalBbox?: boolean;
 }
 
 /** 歸一化座標 → 像素座標 */
@@ -75,10 +77,14 @@ export default function BoundingBox({
   onUpdate,
   onRemove,
   onDoubleClick,
+  showOriginalBbox,
 }: BoundingBoxProps) {
   const isEmpty = !region.text?.trim();
   const color = isEmpty ? EMPTY_BOX_COLOR : getBoxColor(colorIndex);
-  const { x, y, width, height } = normalizedToPixel(region.bbox, displayWidth, displayHeight);
+  // 校正前模式：有 originalBbox 時使用原始座標，否則用當前 bbox
+  const useOriginal = showOriginalBbox && region.originalBbox;
+  const activeBbox = useOriginal ? region.originalBbox! : region.bbox;
+  const { x, y, width, height } = normalizedToPixel(activeBbox, displayWidth, displayHeight);
 
   // 雙擊右鍵刪除
   const lastRightClickRef = useRef(0);
@@ -117,8 +123,9 @@ export default function BoundingBox({
         );
         onUpdate(newBbox);
       }}
+      disableDragging={!!useOriginal}
       style={{ zIndex: isHovered ? 20 : 10 }}
-      enableResizing={{
+      enableResizing={useOriginal ? false : {
         top: true,
         right: true,
         bottom: true,
@@ -130,9 +137,9 @@ export default function BoundingBox({
       }}
     >
       <div
-        className="w-full h-full transition-all duration-150 cursor-move group"
+        className={`w-full h-full transition-all duration-150 group ${useOriginal ? 'cursor-default' : 'cursor-move'}`}
         style={{
-          border: `2px solid ${color.border}`,
+          border: `2px ${useOriginal ? 'dashed' : 'solid'} ${color.border}`,
           backgroundColor: isHovered ? color.hoverBg : color.bg,
           borderRadius: '2px',
           boxShadow: isHovered ? `0 0 0 1px ${color.border}, 0 2px 8px rgba(0,0,0,0.15)` : 'none',
