@@ -190,20 +190,92 @@ export function sanitizePuaChars(text: string): string {
 // ============================================================
 
 /**
- * 退一半佔比歸屬判斷：textItem 是否屬於當前 bbox
- * 與每個 otherBbox 計算 Y 方向重疊的中點，用退一半後的位置比較覆蓋量。
- * 若有任何 otherBbox 的覆蓋量 > 當前 bbox 的覆蓋量，該 textItem 不屬於當前 bbox。
+ * 行距歸屬判斷：被爭奪的 textItem 跟上方/下方最近文字的行距，較小的那邊歸屬
+ * @param myBbox 當前 bbox 的原始座標
+ * @param other 競爭者 bbox 的原始座標
+ * @param ti 被爭奪的 textItem
+ * @param textItems 頁面上所有的 textItems（用於找上下鄰居）
+ * @returns true = 行距判斷屬於當前 bbox，false = 屬於競爭者，null = 無法判斷（fallback 到覆蓋量）
+ */
+function lineSpacingOwnership(
+  myBbox: [number, number, number, number],
+  other: [number, number, number, number],
+  ti: NormTextItem,
+  textItems: NormTextItem[],
+): boolean | null {
+  const tiBaseline = ti.normBaseline;
+  const tiLeft = ti.normX;
+  const tiRight = ti.normX + ti.normW;
+
+  // 找上方最近（baseline < tiBaseline）和下方最近（baseline > tiBaseline）的文字，需 X 重疊
+  let aboveItem: NormTextItem | null = null;
+  let aboveGap = Infinity;
+  let belowItem: NormTextItem | null = null;
+  let belowGap = Infinity;
+
+  for (const t of textItems) {
+    // X 重疊檢查（同一欄的文字才有意義）
+    const tRight = t.normX + t.normW;
+    if (t.normX >= tiRight || tRight <= tiLeft) continue;
+
+    if (t.normBaseline < tiBaseline) {
+      const gap = tiBaseline - t.normBaseline;
+      if (gap < aboveGap) {
+        aboveGap = gap;
+        aboveItem = t;
+      }
+    } else if (t.normBaseline > tiBaseline) {
+      const gap = t.normBaseline - tiBaseline;
+      if (gap < belowGap) {
+        belowGap = gap;
+        belowItem = t;
+      }
+    }
+  }
+
+  if (!aboveItem && !belowItem) return null; // 找不到鄰居
+
+  // 判斷鄰居屬於哪個框（normY 在誰的框內）
+  const isInBox = (item: NormTextItem, box: [number, number, number, number]) =>
+    item.normY >= box[1] && item.normY < box[3];
+
+  const aboveMine = aboveItem ? isInBox(aboveItem, myBbox) : false;
+  const aboveOther = aboveItem ? isInBox(aboveItem, other) : false;
+  const belowMine = belowItem ? isInBox(belowItem, myBbox) : false;
+  const belowOther = belowItem ? isInBox(belowItem, other) : false;
+
+  if (aboveGap < belowGap) {
+    // 跟上方更近 → 屬於上方鄰居的框
+    if (aboveMine && !aboveOther) return true;   // 上方是我的 → 我贏
+    if (aboveOther && !aboveMine) return false;  // 上方是對方的 → 對方贏
+  } else if (belowGap < aboveGap) {
+    // 跟下方更近 → 屬於下方鄰居的框
+    if (belowMine && !belowOther) return true;
+    if (belowOther && !belowMine) return false;
+  }
+  // 行距相等 or 鄰居歸屬不明確 → 無法判斷
+  return null;
+}
+
+/**
+ * 歸屬判斷：textItem 是否屬於當前 bbox
+ * 判斷順序：退一半覆蓋量 → 行距歸屬（覆蓋量輸時 override）→ 覆蓋量 fallback
+ * 1. 退一半覆蓋量：與每個 otherBbox 計算重疊中點，用退一半後位置比較覆蓋量
+ * 2. 行距歸屬：覆蓋量判為「不是我的」時，檢查上下鄰居行距，行距小的那邊可 override
+ * 3. 覆蓋量 fallback：行距無法判斷時（行距相等/鄰居不明），回到覆蓋量結論
  * @param myBbox 當前 bbox 的原始座標
  * @param otherBboxes 其他 region 的原始 bbox
- * @param tiTop textItem 的 normY
- * @param tiBottom textItem 的底部（含降部補償）
+ * @param ti 被判斷的 textItem
+ * @param tiBottomForOverlap textItem 底部（含降部補償，用於覆蓋量計算）
+ * @param textItems 頁面上所有的 textItems（用於行距歸屬判斷）
  * @returns true = 屬於當前 bbox，false = 屬於其他 bbox
  */
 function checkOwnership(
   myBbox: [number, number, number, number],
   otherBboxes: [number, number, number, number][] | undefined,
-  tiTop: number,
-  tiBottom: number,
+  ti: NormTextItem,
+  tiBottomForOverlap: number,
+  textItems: NormTextItem[],
 ): boolean {
   if (!otherBboxes) return true;
 
@@ -219,23 +291,26 @@ function checkOwnership(
       // 有重疊：各退一半到中點
       const mid = (pairOverlapTop + pairOverlapBottom) / 2;
       if (myBbox[1] <= other[1]) {
-        // 我在上方（或起點相同）：我的 y2 退到中點，對方 y1 退到中點
         myEffY2 = Math.min(myEffY2, mid);
         otherEffY1 = Math.max(otherEffY1, mid);
       } else {
-        // 我在下方：我的 y1 退到中點，對方 y2 退到中點
         myEffY1 = Math.max(myEffY1, mid);
         otherEffY2 = Math.min(otherEffY2, mid);
       }
     }
 
     // 用退一半後的位置計算覆蓋量
-    const myCoverage = Math.max(0, Math.min(tiBottom, myEffY2) - Math.max(tiTop, myEffY1));
-    const otherCoverage = Math.max(0, Math.min(tiBottom, otherEffY2) - Math.max(tiTop, otherEffY1));
+    const myCoverage = Math.max(0, Math.min(tiBottomForOverlap, myEffY2) - Math.max(ti.normY, myEffY1));
+    const otherCoverage = Math.max(0, Math.min(tiBottomForOverlap, otherEffY2) - Math.max(ti.normY, otherEffY1));
 
     if (otherCoverage > myCoverage) {
+      // 覆蓋量判為「不是我的」→ 用行距歸屬 override
+      const lsResult = lineSpacingOwnership(myBbox, other, ti, textItems);
+      if (lsResult === true) continue;  // 行距說是我的 → override，繼續檢查下一個 other
+      // lsResult === false 或 null → 維持覆蓋量結論
       return false;
     }
+    // myCoverage >= otherCoverage → 是我的，繼續檢查下一個 other
   }
 
   return true;
@@ -245,11 +320,13 @@ function checkOwnership(
  * 自動校正 bbox 邊界
  * - 水平方向：重疊比例 >= 50% 才擴展（避免吃到相鄰區塊）
  * - 垂直方向：只要框碰到該行就補足到完整行高（任何重疊即擴展）
- * - 垂直方向佔比歸屬（退一半法）：與每個 otherBbox 計算重疊中點，用退一半後的位置比較覆蓋量，
- *   覆蓋量更大的框擁有該 textItem。同時控制擴展和退縮 — 不屬於自己的 textItem 完全忽略
+ * - 歸屬判斷（同時控制擴展和退縮）：
+ *   1. 退一半覆蓋量：與每個 otherBbox 計算重疊中點，用退一半後位置比較覆蓋量
+ *   2. 行距歸屬 override：覆蓋量判為「不是我的」時，檢查上下鄰居行距，行距小的那邊可 override
+ *   3. 覆蓋量 fallback：行距無法判斷時回到覆蓋量結論
  * - 降部補償不在此處加入 — 由外層在 enforce 之後獨立處理，避免汙染後續校正階段的座標
  * @param snapDebug 可選 debug 收集器 — 傳入時會記錄迭代次數和觸發擴展的 text items
- * @param otherBboxes 可選 — 其他 region 的原始 bbox（用於退一半佔比歸屬判斷，避免吃到鄰框文字）
+ * @param otherBboxes 可選 — 其他 region 的原始 bbox（用於歸屬判斷，避免吃到鄰框文字）
  */
 export function snapBboxToText(
   bbox: [number, number, number, number],
@@ -310,10 +387,10 @@ export function snapBboxToText(
       // 垂直方向：只要框碰到該行就補足到視覺文字邊界（任何重疊即擴展）
       // 用 VISUAL_TOP_RATIO / VISUAL_BOTTOM_RATIO 估算實際文字邊界，
       // 避免框擴展到 em square 完整範圍導致上方留白過多
-      // 佔比歸屬（退一半法）：與每個 otherBbox 計算重疊中點，用退一半後位置比較覆蓋量
+      // 歸屬判斷：覆蓋量 → 行距歸屬 override → 覆蓋量 fallback
       if (overlapHeight > 0) {
-        // 佔比歸屬判斷：用退一半法判斷 textItem 歸屬
-        const isMyText = checkOwnership(bbox, otherBboxes, ti.normY, tiBottomForOverlap);
+        // 歸屬判斷：退一半覆蓋量 + 行距歸屬
+        const isMyText = checkOwnership(bbox, otherBboxes, ti, tiBottomForOverlap, textItems);
 
         if (isMyText) {
           const visualTop = ti.normY + ti.normH * VISUAL_TOP_RATIO;
@@ -361,8 +438,8 @@ export function snapBboxToText(
     const xRatio = ti.normW > 0 ? overlapWidth / ti.normW : 0;
     if (xRatio < SNAP_OVERLAP_RATIO) continue;
 
-    // 佔比歸屬：只有屬於自己的 textItem 才納入退縮邊界計算
-    if (!checkOwnership(bbox, otherBboxes, ti.normY, tiBottomForOverlap)) continue;
+    // 歸屬判斷：只有屬於自己的 textItem 才納入退縮邊界計算
+    if (!checkOwnership(bbox, otherBboxes, ti, tiBottomForOverlap, textItems)) continue;
 
     const visualTop = ti.normY + ti.normH * VISUAL_TOP_RATIO;
     const visualBottom = tiBottom + ti.normH * VISUAL_BOTTOM_RATIO;

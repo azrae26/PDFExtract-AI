@@ -77,6 +77,8 @@ export default function useAnalysis({
   const abortRef = useRef(false);
   // 追蹤正在飛行中的單頁重送數量（修正多頁同時重送時計數不累加的 bug）
   const inFlightPageRef = useRef(0);
+  // per-file 的 in-flight 計數器（修正：多檔案同時重跑單頁時，各檔案獨立恢復 status）
+  const inFlightPerFileRef = useRef<Map<string, number>>(new Map());
   // Session ID：每次啟動新的全頁分析或切換檔案時遞增，非同步操作用此判斷是否已過期
   const analysisSessionRef = useRef(0);
   // 目前分析的目標檔案 ID（支援切檔後分析繼續）
@@ -668,6 +670,7 @@ export default function useAnalysis({
     abortRef.current = true;
     analysisSessionRef.current++;
     inFlightPageRef.current = 0;
+    inFlightPerFileRef.current = new Map();
     addPagesToQueueRef.current = null;
     addRecognizeTasksRef.current = null;
     setBatchIsAnalyzing(false);
@@ -789,6 +792,7 @@ export default function useAnalysis({
 
       // 累加進度，而非覆蓋
       inFlightPageRef.current++;
+      inFlightPerFileRef.current.set(targetFileId, (inFlightPerFileRef.current.get(targetFileId) || 0) + 1);
       setBatchIsAnalyzing(true);
       // 設定檔案狀態為 processing（讓列表與設定面板顯示轉圈圈圖示）
       updateFileProgress(targetFileId, { status: 'processing' });
@@ -855,6 +859,7 @@ export default function useAnalysis({
             // 累加進度（識別任務計入總數）
             const recCount = emptyRegions.length;
             inFlightPageRef.current += recCount;
+            inFlightPerFileRef.current.set(targetFileId, (inFlightPerFileRef.current.get(targetFileId) || 0) + recCount);
             setAnalysisProgress((prev) => ({ current: prev.current, total: prev.total + recCount }));
             updateFileProgress(targetFileId, { analysisDelta: recCount });
 
@@ -905,6 +910,10 @@ export default function useAnalysis({
                 setAnalysisProgress((prev) => ({ ...prev, current: prev.current + 1 }));
                 updateFileProgress(targetFileId, { completedDelta: 1 });
                 inFlightPageRef.current--;
+                // per-file 計數器遞減
+                const pfc = (inFlightPerFileRef.current.get(targetFileId) || 1) - 1;
+                if (pfc <= 0) inFlightPerFileRef.current.delete(targetFileId);
+                else inFlightPerFileRef.current.set(targetFileId, pfc);
               }
             };
 
@@ -921,8 +930,21 @@ export default function useAnalysis({
       // 更新 per-file 已完成頁數（無論是從佇列拉出或獨立重跑，都要同步進度到列表與設定面板）
       updateFileProgress(targetFileId, { completedDelta: 1 });
 
-      // 只有當所有飛行中的頁面都完成時才停止分析狀態
+      // === per-file 計數器遞減：此檔案所有 in-flight 完成時立刻設回 done（不等其他檔案）===
       inFlightPageRef.current--;
+      const thisFileCount = (inFlightPerFileRef.current.get(targetFileId) || 1) - 1;
+      if (thisFileCount <= 0) {
+        inFlightPerFileRef.current.delete(targetFileId);
+        // 此檔案所有 in-flight 頁面完成，立即設回 done（不等全域計數歸零）
+        // 注入 pool 的由 handlePoolFileComplete 負責
+        if (!injectedToPool) {
+          updateFileProgress(targetFileId, { status: 'done' });
+        }
+      } else {
+        inFlightPerFileRef.current.set(targetFileId, thisFileCount);
+      }
+
+      // === 全域計數歸零：重置全域分析狀態 ===
       if (inFlightPageRef.current === 0) {
         // 守衛：若 batch pool 還在跑（analysisFileIdRef !== null），不能碰 batchIsAnalyzing / analysisProgress
         // 否則會觸發 completion effect 把仍在 processing 的檔案全部標為 done
@@ -931,10 +953,6 @@ export default function useAnalysis({
           setBatchIsAnalyzing(false);
           // 重置進度（避免下次累計混亂）
           setAnalysisProgress({ current: 0, total: 0 });
-        }
-        // 設回 done（僅限本地處理完畢；注入 pool 的由 handlePoolFileComplete 負責）
-        if (!injectedToPool) {
-          updateFileProgress(targetFileId, { status: 'done' });
         }
       }
     },
