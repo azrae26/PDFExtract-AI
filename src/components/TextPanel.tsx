@@ -293,8 +293,8 @@ export default function TextPanel({
                       onDragStart={() => handleDragStart(page, index)}
                       onDragOver={(e) => handleDragOver(page, index, e)}
                       onDragEnd={() => handleDragEnd(page, regions)}
-                      className={`relative rounded-lg p-3 cursor-pointer border group ${
-                        isHovered ? 'shadow-md' : 'shadow-sm'
+                      className={`relative rounded-lg p-3 transition-all duration-150 cursor-pointer border group ${
+                        isHovered ? 'shadow-md scale-[1.01]' : 'shadow-sm'
                       } ${isDragging ? 'opacity-40' : ''} ${isDropTarget ? 'ring-2 ring-blue-400' : ''}`}
                       style={{
                         backgroundColor: isHovered ? color.hoverBg : color.textBg,

@@ -50,11 +50,6 @@ body {
   animation: hourglass-flip 3s ease-in-out infinite;
 }
 
-/* 滾動期間禁用 BoundingBox 的 pointer-events，避免 hover 觸發 re-render lag */
-[data-scrolling] .bbox-overlay {
-  pointer-events: none !important;
-}
-
 /* react-pdf 的 annotation layer 修正 */
 .react-pdf__Page__annotations {
   display: none;

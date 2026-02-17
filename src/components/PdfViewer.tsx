@@ -88,15 +88,6 @@ export default function PdfViewer({
   // 每頁右側按鈕群的 ref（用於 scroll 時動態 clamp 位置）
   const btnGroupRefs = useRef<Map<number, HTMLDivElement>>(new Map());
 
-  // 滾動期間禁用 BoundingBox pointer-events（避免 hover 觸發重渲染導致 lag）
-  const scrollIdleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  // 包裝 onHover：滾動期間忽略所有 hover 事件（含 pointer-events:none 觸發的 mouseleave）
-  const guardedOnHover = useCallback((regionId: string | null) => {
-    if (scrollRef.current?.dataset.scrolling === '1') return;
-    onHover(regionId);
-  }, [onHover]);
-
   // 上方/下方還有幾個框的計數
   const [aboveCount, setAboveCount] = useState(0);
   const [belowCount, setBelowCount] = useState(0);
@@ -382,13 +373,6 @@ export default function PdfViewer({
     if (!scrollEl) return;
     let ticking = false;
     const handler = () => {
-      // 滾動開始：禁用 BoundingBox pointer-events，避免 hover 觸發 re-render lag
-      scrollEl.dataset.scrolling = '1';
-      if (scrollIdleTimerRef.current) clearTimeout(scrollIdleTimerRef.current);
-      scrollIdleTimerRef.current = setTimeout(() => {
-        delete scrollEl.dataset.scrolling;
-      }, 150);
-
       if (ticking) return;
       ticking = true;
       requestAnimationFrame(() => {
@@ -413,10 +397,7 @@ export default function PdfViewer({
     // 初始計算
     updateAboveBelowCounts();
     handler(); // 按鈕初始位置
-    return () => {
-      scrollEl.removeEventListener('scroll', handler);
-      if (scrollIdleTimerRef.current) clearTimeout(scrollIdleTimerRef.current);
-    };
+    return () => scrollEl.removeEventListener('scroll', handler);
   }, [updateAboveBelowCounts]);
 
   // pageRegions 變化時也重新計算
@@ -594,7 +575,7 @@ export default function PdfViewer({
                   {/* Bounding Boxes 覆蓋層（也是畫新框的拖曳目標） */}
                   {isVisible && dim && dim.width > 0 && (
                     <div
-                      className="absolute top-0 left-0 bbox-overlay"
+                      className="absolute top-0 left-0"
                       style={{ width: dim.width, height: dim.height, cursor: 'crosshair' }}
                       onMouseDown={(e) => handleOverlayMouseDown(pageNum, dim, e)}
                     >
@@ -608,8 +589,8 @@ export default function PdfViewer({
                             displayWidth={dim.width}
                             displayHeight={dim.height}
                             isHovered={hoveredRegionId === regionKey}
-                            onHover={() => guardedOnHover(regionKey)}
-                            onHoverEnd={() => guardedOnHover(null)}
+                            onHover={() => onHover(regionKey)}
+                            onHoverEnd={() => onHover(null)}
                             onUpdate={(newBbox) => onRegionUpdate(pageNum, region.id, newBbox)}
                             onRemove={() => onRegionRemove(pageNum, region.id)}
                             onDoubleClick={() => onRegionDoubleClick(pageNum, region.id)}
