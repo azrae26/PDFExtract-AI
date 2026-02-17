@@ -1,7 +1,7 @@
 /**
  * 功能：從 PDF 頁面的文字層中，根據 bounding box 座標提取文字，並自動校正不完整的 bbox
  * 職責：接收 pdfjs PDFPageProxy + Region[]，利用 getTextContent() 取得文字項，
- *       呼叫 pdfTextExtractCore 的純函式完成 snap → resolve → enforce → descender → extract 流程，
+ *       呼叫 pdfTextExtractCore 的純函式完成 snap → enforce → descender → extract 流程，
  *       並在各 phase 間快照 bbox 供 debug 診斷
  *       本檔案僅負責 pdfjs 的 IO 層（getTextContent + 座標轉換），所有演算法在 core 中
  * 依賴：pdfjs-dist (PDFPageProxy)、pdfTextExtractCore（純演算法）、types.ts（RegionDebugInfo）
@@ -14,11 +14,11 @@ import {
   NORMALIZED_MAX,
   _ts,
   snapBboxToText,
-  resolveOverlappingLines,
   enforceMinVerticalGap,
   applyDescenderCompensation,
   extractTextFromBbox,
   ExtractDebugCollector,
+  SnapDebugCollector,
   isWingdingsFont,
   sanitizeWingdings,
 } from './pdfTextExtractCore';
@@ -34,7 +34,7 @@ interface PdfTextItem {
 
 /**
  * 從 PDF 頁面提取文字並填入各 Region 的 text 欄位
- * 流程：snap（水平+Y半行補足）→ resolve（重疊行解衝突）→ 提取文字
+ * 流程：snap（水平+Y半行補足+退一半佔比歸屬）→ enforce → descender → 提取文字
  * @param page - pdfjs PDFPageProxy
  * @param regions - AI 回傳的 Region[]（text 為空）
  * @returns 填入 text 的 Region[]（bbox 可能被校正）
@@ -128,21 +128,25 @@ export async function extractTextForRegions(
     textItems.push({ str, normX, normY, normW, normH, normBaseline: normY + normH });
   }
 
-  // === Phase 1: Snap — 水平校正 + Y 軸半行補足 ===
+  // === Phase 1: Snap — 水平校正 + Y 軸半行補足 + 退一半佔比歸屬 ===
+  // 用原始 bbox 位置做退一半佔比歸屬判斷（不受 snap 順序影響）
+  // 佔比歸屬同時控制擴展和退縮，取代了原本的 resolve（行距歸屬）
+  const originalBboxes = regions.map(r => [...r.bbox] as [number, number, number, number]);
+  const snapDebugCollectors: SnapDebugCollector[] = regions.map(() => ({ iterations: 0, triggers: [] }));
   const snappedBboxes: [number, number, number, number][] = regions.map(
-    (r) => snapBboxToText(r.bbox, textItems)
+    (r, i) => {
+      const otherBboxes = originalBboxes.filter((_, j) => j !== i);
+      return snapBboxToText(r.bbox, textItems, snapDebugCollectors[i], otherBboxes);
+    }
   );
   // Debug 快照：snap 後
   const afterSnap: [number, number, number, number][] = snappedBboxes.map(
     b => [...b] as [number, number, number, number]
   );
 
-  // === Phase 2: Resolve — 跨 region 重疊行解衝突 ===
-  resolveOverlappingLines(snappedBboxes, textItems);
-  // Debug 快照：resolve 後
-  const afterResolve: [number, number, number, number][] = snappedBboxes.map(
-    b => [...b] as [number, number, number, number]
-  );
+  // Phase 2 (resolve) 已移除 — 佔比歸屬已在 snap 內完成
+  // Debug 快照：保留 afterResolve 欄位以維持 debug 結構向後相容
+  const afterResolve = afterSnap;
 
   // === Phase 2.5: 保證框間最小垂直間距 ===
   enforceMinVerticalGap(snappedBboxes);
@@ -151,7 +155,7 @@ export async function extractTextForRegions(
     b => [...b] as [number, number, number, number]
   );
 
-  // === Phase 2.75: 降部補償（在 resolve/enforce 之後，避免汙染前面的座標判斷） ===
+  // === Phase 2.75: 降部補償（在 enforce 之後，避免汙染前面的座標判斷） ===
   applyDescenderCompensation(snappedBboxes, textItems);
 
   // === Phase 3: 提取文字 + 組裝結果（含 debug 收集） ===
@@ -193,6 +197,45 @@ export async function extractTextForRegions(
       adaptiveThreshold: debugCollector.adaptiveThreshold,
       lineGaps: debugCollector.lineGaps,
       medianLineGap: debugCollector.medianLineGap,
+      yOverlapMerges: debugCollector.yOverlapMerges,
+      fragmentMerges: debugCollector.fragmentMerges,
+      adaptiveDetail: debugCollector.adaptiveDetail,
+    };
+
+    // 各階段校正過程詳情
+    const orig = region.bbox;
+    const snap = afterSnap[i];
+    const resolve = afterResolve[i];
+    const enforce = afterEnforce[i];
+    const final_ = finalBbox;
+    const r1 = (v: number) => Math.round(v * 10) / 10;
+    const phaseDelta = (from: [number, number, number, number], to: [number, number, number, number]): [number, number, number, number] =>
+      [r1(to[0] - from[0]), r1(to[1] - from[1]), r1(to[2] - from[2]), r1(to[3] - from[3])];
+    const snapCollector = snapDebugCollectors[i];
+
+    _debug.corrections = {
+      snap: {
+        delta: phaseDelta(orig, snap),
+        iterations: snapCollector.iterations,
+        triggers: snapCollector.triggers.map(t => ({
+          str: t.str,
+          x: Math.round(t.normX),
+          y: Math.round(t.normY),
+          w: Math.round(t.normW),
+          h: Math.round(t.normH),
+          xRatio: t.xRatio,
+          expanded: t.expanded,
+        })),
+      },
+      resolve: { delta: phaseDelta(snap, resolve) },
+      enforce: { delta: phaseDelta(resolve, enforce) },
+      descender: { delta: phaseDelta(enforce, final_) },
+      size: {
+        original: { w: r1(orig[2] - orig[0]), h: r1(orig[3] - orig[1]) },
+        final: { w: r1(final_[2] - final_[0]), h: r1(final_[3] - final_[1]) },
+        deltaW: r1((final_[2] - final_[0]) - (orig[2] - orig[0])),
+        deltaH: r1((final_[3] - final_[1]) - (orig[3] - orig[1])),
+      },
     };
 
     // 符號字型偵測結果（fontName → 真實字型名稱）

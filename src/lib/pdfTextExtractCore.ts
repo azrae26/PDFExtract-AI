@@ -29,6 +29,22 @@ export interface TextLine {
   bottomY: number;   // 行的最大 normBaseline（視覺下緣）
 }
 
+/** snapBboxToText 的 debug 資料收集器 */
+export interface SnapDebugCollector {
+  /** 實際迭代次數 */
+  iterations: number;
+  /** 觸發擴展的 text items（每個座標方向只記錄最遠觸發者，最多 4 個） */
+  triggers: {
+    str: string;       // 完整文字內容
+    normX: number;     // text item 位置
+    normY: number;
+    normW: number;
+    normH: number;
+    xRatio: number;    // 水平重疊比例
+    expanded: string;  // 擴展方向，如 "x1←" "y1↑" "x2→" "y2↓"
+  }[];
+}
+
 /** bbox 內的文字命中項（用於排序和多欄偵測） */
 export interface Hit {
   str: string;
@@ -53,8 +69,16 @@ export const SNAP_OVERLAP_RATIO = 0.5;
 export const SAME_LINE_THRESHOLD = 15;
 /** 框間最小垂直間距（歸一化單位），擴張後上下太近時各自退縮 */
 export const MIN_VERTICAL_GAP = 5;
-/** 降部補償比例：PDF 文字項 height 通常為 em height，降部約佔 15%（依字型而異） */
-export const DESCENDER_RATIO = 0.15;
+/** 降部補償比例：PDF 文字項 height 通常為 em height，降部約佔 25%（依字型而異） */
+export const DESCENDER_RATIO = 0.20;
+/** 上方視覺留白比例：em square 頂部到文字視覺上緣的估計距離（佔 normH 的比例）
+ *  snap 擴展 y1 時用 normY + normH × 此值 取代 normY，減少上方留白 */
+export const VISUAL_TOP_RATIO = 0.25;
+/** 下方視覺延伸比例：baseline 以下文字延伸到的估計距離（佔 normH 的比例）
+ *  snap 擴展 y2 時用 tiBottom + normH × 此值 取代 tiBottom，補足 descender 初始量 */
+export const VISUAL_BOTTOM_RATIO = 0.05;
+/** Y 重疊行合併最小重疊量（歸一化單位）：防止相鄰行因 baseline ≈ normY 產生浮點微小重疊而誤合併 */
+export const Y_OVERLAP_MIN = 2;
 
 // === 多欄偵測常數 ===
 /** 投影法桶寬（歸一化單位，X 軸離散化精度） */
@@ -166,16 +190,80 @@ export function sanitizePuaChars(text: string): string {
 // ============================================================
 
 /**
+ * 退一半佔比歸屬判斷：textItem 是否屬於當前 bbox
+ * 與每個 otherBbox 計算 Y 方向重疊的中點，用退一半後的位置比較覆蓋量。
+ * 若有任何 otherBbox 的覆蓋量 > 當前 bbox 的覆蓋量，該 textItem 不屬於當前 bbox。
+ * @param myBbox 當前 bbox 的原始座標
+ * @param otherBboxes 其他 region 的原始 bbox
+ * @param tiTop textItem 的 normY
+ * @param tiBottom textItem 的底部（含降部補償）
+ * @returns true = 屬於當前 bbox，false = 屬於其他 bbox
+ */
+function checkOwnership(
+  myBbox: [number, number, number, number],
+  otherBboxes: [number, number, number, number][] | undefined,
+  tiTop: number,
+  tiBottom: number,
+): boolean {
+  if (!otherBboxes) return true;
+
+  for (const other of otherBboxes) {
+    // 計算當前 bbox 和此 otherBbox 的 Y 方向重疊
+    const pairOverlapTop = Math.max(myBbox[1], other[1]);
+    const pairOverlapBottom = Math.min(myBbox[3], other[3]);
+
+    let myEffY1 = myBbox[1], myEffY2 = myBbox[3];
+    let otherEffY1 = other[1], otherEffY2 = other[3];
+
+    if (pairOverlapBottom > pairOverlapTop) {
+      // 有重疊：各退一半到中點
+      const mid = (pairOverlapTop + pairOverlapBottom) / 2;
+      if (myBbox[1] <= other[1]) {
+        // 我在上方（或起點相同）：我的 y2 退到中點，對方 y1 退到中點
+        myEffY2 = Math.min(myEffY2, mid);
+        otherEffY1 = Math.max(otherEffY1, mid);
+      } else {
+        // 我在下方：我的 y1 退到中點，對方 y2 退到中點
+        myEffY1 = Math.max(myEffY1, mid);
+        otherEffY2 = Math.min(otherEffY2, mid);
+      }
+    }
+
+    // 用退一半後的位置計算覆蓋量
+    const myCoverage = Math.max(0, Math.min(tiBottom, myEffY2) - Math.max(tiTop, myEffY1));
+    const otherCoverage = Math.max(0, Math.min(tiBottom, otherEffY2) - Math.max(tiTop, otherEffY1));
+
+    if (otherCoverage > myCoverage) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+/**
  * 自動校正 bbox 邊界
  * - 水平方向：重疊比例 >= 50% 才擴展（避免吃到相鄰區塊）
  * - 垂直方向：只要框碰到該行就補足到完整行高（任何重疊即擴展）
- * - 降部補償不在此處加入 — 由外層在 resolve/enforce 之後獨立處理，避免汙染後續校正階段的座標
+ * - 垂直方向佔比歸屬（退一半法）：與每個 otherBbox 計算重疊中點，用退一半後的位置比較覆蓋量，
+ *   覆蓋量更大的框擁有該 textItem。同時控制擴展和退縮 — 不屬於自己的 textItem 完全忽略
+ * - 降部補償不在此處加入 — 由外層在 enforce 之後獨立處理，避免汙染後續校正階段的座標
+ * @param snapDebug 可選 debug 收集器 — 傳入時會記錄迭代次數和觸發擴展的 text items
+ * @param otherBboxes 可選 — 其他 region 的原始 bbox（用於退一半佔比歸屬判斷，避免吃到鄰框文字）
  */
 export function snapBboxToText(
   bbox: [number, number, number, number],
   textItems: NormTextItem[],
+  snapDebug?: SnapDebugCollector,
+  otherBboxes?: [number, number, number, number][],
 ): [number, number, number, number] {
   let [x1, y1, x2, y2] = bbox;
+
+  // Debug: 追蹤每個座標方向最遠的觸發者
+  let x1Trigger: SnapDebugCollector['triggers'][0] | null = null;
+  let y1Trigger: SnapDebugCollector['triggers'][0] | null = null;
+  let x2Trigger: SnapDebugCollector['triggers'][0] | null = null;
+  let y2Trigger: SnapDebugCollector['triggers'][0] | null = null;
 
   // 迭代擴展 — 只納入重疊比例 >= 50% 的文字項目
   let changed = true;
@@ -205,16 +293,99 @@ export function snapBboxToText(
       // 水平方向：重疊比例 >= 50% 才擴展
       const xRatio = ti.normW > 0 ? overlapWidth / ti.normW : 0;
       if (xRatio >= SNAP_OVERLAP_RATIO) {
-        if (ti.normX < x1) { x1 = ti.normX; changed = true; }
-        if (tiRight > x2) { x2 = tiRight; changed = true; }
+        if (ti.normX < x1) {
+          x1 = ti.normX; changed = true;
+          if (snapDebug) {
+            x1Trigger = { str: ti.str, normX: ti.normX, normY: ti.normY, normW: ti.normW, normH: ti.normH, xRatio: Math.round(xRatio * 100) / 100, expanded: 'x1←' };
+          }
+        }
+        if (tiRight > x2) {
+          x2 = tiRight; changed = true;
+          if (snapDebug) {
+            x2Trigger = { str: ti.str, normX: ti.normX, normY: ti.normY, normW: ti.normW, normH: ti.normH, xRatio: Math.round(xRatio * 100) / 100, expanded: 'x2→' };
+          }
+        }
       }
 
-      // 垂直方向：只要框碰到該行就補足到完整行高（任何重疊即擴展）
+      // 垂直方向：只要框碰到該行就補足到視覺文字邊界（任何重疊即擴展）
+      // 用 VISUAL_TOP_RATIO / VISUAL_BOTTOM_RATIO 估算實際文字邊界，
+      // 避免框擴展到 em square 完整範圍導致上方留白過多
+      // 佔比歸屬（退一半法）：與每個 otherBbox 計算重疊中點，用退一半後位置比較覆蓋量
       if (overlapHeight > 0) {
-        if (ti.normY < y1) { y1 = ti.normY; changed = true; }
-        if (tiBottom > y2) { y2 = tiBottom; changed = true; }
+        // 佔比歸屬判斷：用退一半法判斷 textItem 歸屬
+        const isMyText = checkOwnership(bbox, otherBboxes, ti.normY, tiBottomForOverlap);
+
+        if (isMyText) {
+          const visualTop = ti.normY + ti.normH * VISUAL_TOP_RATIO;
+          const visualBottom = tiBottom + ti.normH * VISUAL_BOTTOM_RATIO;
+          if (visualTop < y1) {
+            y1 = visualTop; changed = true;
+            if (snapDebug) {
+              y1Trigger = { str: ti.str, normX: ti.normX, normY: ti.normY, normW: ti.normW, normH: ti.normH, xRatio: Math.round(xRatio * 100) / 100, expanded: 'y1↑' };
+            }
+          }
+          if (visualBottom > y2) {
+            y2 = visualBottom; changed = true;
+            if (snapDebug) {
+              y2Trigger = { str: ti.str, normX: ti.normX, normY: ti.normY, normW: ti.normW, normH: ti.normH, xRatio: Math.round(xRatio * 100) / 100, expanded: 'y2↓' };
+            }
+          }
+        }
       }
     }
+  }
+
+  // === 退縮：框邊界超出文字範圍時收縮到「屬於自己的」文字的視覺邊界 ===
+  // AI 給的框可能比文字範圍大，snap 只擴展不退縮，需要額外收縮到最近文字邊界
+  // 佔比歸屬同時控制退縮：不屬於自己的 textItem 不納入邊界計算，確保框不覆蓋鄰框的文字
+  let minVisualTop = y2;     // 初始為框底（找最小值）
+  let maxVisualBottom = y1;  // 初始為框頂（找最大值）
+  let hasTrimHits = false;
+
+  for (const ti of textItems) {
+    const tiRight = ti.normX + ti.normW;
+    const tiBottom = ti.normY + ti.normH;
+    const tiBottomForOverlap = tiBottom + ti.normH * DESCENDER_RATIO;
+
+    // 交集判定（和擴展邏輯一致）
+    const overlapLeft = Math.max(ti.normX, x1);
+    const overlapRight = Math.min(tiRight, x2);
+    const overlapWidth = overlapRight - overlapLeft;
+    const overlapTop = Math.max(ti.normY, y1);
+    const overlapBottom = Math.min(tiBottomForOverlap, y2);
+    const overlapHeight = overlapBottom - overlapTop;
+
+    if (overlapWidth <= 0 || overlapHeight <= 0) continue;
+
+    // 水平重疊比例門檻（和擴展一致）
+    const xRatio = ti.normW > 0 ? overlapWidth / ti.normW : 0;
+    if (xRatio < SNAP_OVERLAP_RATIO) continue;
+
+    // 佔比歸屬：只有屬於自己的 textItem 才納入退縮邊界計算
+    if (!checkOwnership(bbox, otherBboxes, ti.normY, tiBottomForOverlap)) continue;
+
+    const visualTop = ti.normY + ti.normH * VISUAL_TOP_RATIO;
+    const visualBottom = tiBottom + ti.normH * VISUAL_BOTTOM_RATIO;
+
+    minVisualTop = Math.min(minVisualTop, visualTop);
+    maxVisualBottom = Math.max(maxVisualBottom, visualBottom);
+    hasTrimHits = true;
+  }
+
+  if (hasTrimHits) {
+    if (y1 < minVisualTop) y1 = minVisualTop;
+    if (y2 > maxVisualBottom) y2 = maxVisualBottom;
+  }
+
+  // 寫入 debug 收集器
+  if (snapDebug) {
+    snapDebug.iterations = iterations;
+    const triggers: SnapDebugCollector['triggers'] = [];
+    if (x1Trigger) triggers.push(x1Trigger);
+    if (y1Trigger) triggers.push(y1Trigger);
+    if (x2Trigger) triggers.push(x2Trigger);
+    if (y2Trigger) triggers.push(y2Trigger);
+    snapDebug.triggers = triggers;
   }
 
   return [x1, y1, x2, y2];
@@ -788,7 +959,7 @@ export function splitIntoColumns(hits: Hit[], debug?: ExtractDebugCollector): Hi
  */
 export interface ExtractDebugCollector {
   /** 落入 bbox 的 Hit 列表 */
-  hits: { str: string; x: number; y: number; right: number; baseline: number }[];
+  hits: { str: string; x: number; y: number; h: number; right: number; baseline: number }[];
   /** 偵測到的欄數 */
   columns: number;
   /** 多欄分界線位置 */
@@ -807,6 +978,18 @@ export interface ExtractDebugCollector {
   lineGaps: number[];
   /** 行距中位數 */
   medianLineGap: number;
+  /** Y-overlap 行合併事件 */
+  yOverlapMerges?: { str: string; blDiff: number; overlap: number; toLineIdx: number }[];
+  /** 行碎片重組事件 */
+  fragmentMerges?: { fromLine: number; toLine: number; combinedXMin: number; combinedXMax: number }[];
+  /** 自適應閾值計算詳情 */
+  adaptiveDetail?: {
+    path: 'stable' | 'fallback' | 'none';
+    stableCount?: number;
+    minStableSpacing?: number;
+    microClusterCount?: number;
+    medianMicroSpacing?: number;
+  };
 }
 
 /**
@@ -830,6 +1013,12 @@ export function formatColumnText(hits: Hit[], debug?: ExtractDebugCollector): st
   // 解法：先用微聚類（閾值=3）找出穩定行（≥2 items），計算真正的行距，
   //       再用行距 × 0.7 作為分行閾值。超連結等 baseline 偏移的單 item 被過濾掉，不影響行距估算。
   let lineThreshold = SAME_LINE_THRESHOLD;
+  let _adaptivePath: 'stable' | 'fallback' | 'none' = 'none';
+  let _stableCount = 0;
+  let _minStableSpacing: number | undefined;
+  let _microClusterCount = 0;
+  let _medianMicroSpacing: number | undefined;
+
   if (sorted.length >= 4) {
     const MICRO_THRESHOLD = 3; // 微聚類閾值：baseline 差 < 3 → 肯定同行
     const microClusters: { baseline: number; count: number }[] =
@@ -842,15 +1031,20 @@ export function formatColumnText(hits: Hit[], debug?: ExtractDebugCollector): st
         microClusters.push({ baseline: sorted[i].normBaseline, count: 1 });
       }
     }
+    _microClusterCount = microClusters.length;
+
     // 穩定行 = count >= 2 的微聚類（超連結等異字型通常只有 1 個 item）
     const stableClusters = microClusters.filter(c => c.count >= 2);
+    _stableCount = stableClusters.length;
     if (stableClusters.length >= 2) {
       let minSpacing = Infinity;
       for (let i = 1; i < stableClusters.length; i++) {
         minSpacing = Math.min(minSpacing, stableClusters[i].baseline - stableClusters[i - 1].baseline);
       }
+      _minStableSpacing = Math.round(minSpacing * 10) / 10;
       if (minSpacing > 3 && minSpacing < SAME_LINE_THRESHOLD) {
         lineThreshold = Math.max(3, minSpacing * 0.7);
+        _adaptivePath = 'stable';
         console.log(
           `[pdfTextExtract][${_ts()}] 🎯 自適應行閾值: 穩定行=${stableClusters.length}` +
           `, 最小行距=${minSpacing.toFixed(1)}, 閾值=${lineThreshold.toFixed(1)}` +
@@ -867,8 +1061,10 @@ export function formatColumnText(hits: Hit[], debug?: ExtractDebugCollector): st
       }
       spacings.sort((a, b) => a - b);
       const medianSpacing = spacings[Math.floor(spacings.length / 2)];
+      _medianMicroSpacing = Math.round(medianSpacing * 10) / 10;
       if (medianSpacing > 3 && medianSpacing < SAME_LINE_THRESHOLD) {
         lineThreshold = Math.max(3, medianSpacing * 0.7);
+        _adaptivePath = 'fallback';
         console.log(
           `[pdfTextExtract][${_ts()}] 🎯 自適應行閾值(fallback): 微聚類=${microClusters.length}` +
           `, 中位數行距=${medianSpacing.toFixed(1)}, 閾值=${lineThreshold.toFixed(1)}` +
@@ -904,14 +1100,25 @@ export function formatColumnText(hits: Hit[], debug?: ExtractDebugCollector): st
       const overlapTop = Math.max(coreYRange.top, sorted[i].normY);
       const overlapBottom = Math.min(coreYRange.bottom, sorted[i].normBaseline);
 
-      if (overlapBottom > overlapTop) {
-        // Y 重疊 → 同一視覺行（粗體 + 正文等 baseline 偏移情境），不更新 coreYRange
+      if (overlapBottom - overlapTop >= Y_OVERLAP_MIN) {
+        // Y 重疊（至少 Y_OVERLAP_MIN 單位）→ 同一視覺行（粗體 + 正文等 baseline 偏移情境），不更新 coreYRange
+        const blDiff = sorted[i].normBaseline - lastLine[0].normBaseline;
+        const overlapAmount = overlapBottom - overlapTop;
         console.log(
           `[pdfTextExtract][${_ts()}] 🔀 Y-overlap 行合併: blDiff=` +
-          `${(sorted[i].normBaseline - lastLine[0].normBaseline).toFixed(1)}` +
-          ` > threshold=${lineThreshold.toFixed(1)}, Y overlap=${(overlapBottom - overlapTop).toFixed(1)}` +
+          `${blDiff.toFixed(1)}` +
+          ` > threshold=${lineThreshold.toFixed(1)}, Y overlap=${overlapAmount.toFixed(1)}` +
           ` → "${sorted[i].str.substring(0, 30)}"`
         );
+        if (debug) {
+          if (!debug.yOverlapMerges) debug.yOverlapMerges = [];
+          debug.yOverlapMerges.push({
+            str: sorted[i].str.substring(0, 50),
+            blDiff: Math.round(blDiff * 10) / 10,
+            overlap: Math.round(overlapAmount * 10) / 10,
+            toLineIdx: lines.length - 1,
+          });
+        }
         lastLine.push(sorted[i]);
       } else {
         // 不同行
@@ -971,6 +1178,15 @@ export function formatColumnText(hits: Hit[], debug?: ExtractDebugCollector): st
             ` + 行[${j}](X=${Math.round(lineXInfos[j].minX)}-${Math.round(lineXInfos[j].maxX)})` +
             ` → X=${Math.round(combinedMinX)}-${Math.round(combinedMaxX)}`
           );
+          if (debug) {
+            if (!debug.fragmentMerges) debug.fragmentMerges = [];
+            debug.fragmentMerges.push({
+              fromLine: j,
+              toLine: i,
+              combinedXMin: Math.round(combinedMinX),
+              combinedXMax: Math.round(combinedMaxX),
+            });
+          }
 
           lines[i].push(...lines[j]);
           lines[i].sort((a, b) => a.normX - b.normX);
@@ -1012,6 +1228,13 @@ export function formatColumnText(hits: Hit[], debug?: ExtractDebugCollector): st
     debug.adaptiveThreshold = lineThreshold !== SAME_LINE_THRESHOLD;
     debug.lineGaps = lineGaps.map(g => Math.round(g * 10) / 10);
     debug.medianLineGap = Math.round(medianLineGap * 10) / 10;
+    debug.adaptiveDetail = {
+      path: _adaptivePath,
+      stableCount: _stableCount || undefined,
+      minStableSpacing: _minStableSpacing,
+      microClusterCount: _microClusterCount || undefined,
+      medianMicroSpacing: _medianMicroSpacing,
+    };
   }
 
   // === Step 5: 逐行拼接文字 ===
@@ -1106,6 +1329,7 @@ export function extractTextFromBbox(
       str: h.str,
       x: Math.round(h.normX),
       y: Math.round(h.normY),
+      h: Math.round(h.normBaseline - h.normY),
       right: Math.round(h.normRight),
       baseline: Math.round(h.normBaseline),
     }));

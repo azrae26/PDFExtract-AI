@@ -21,7 +21,7 @@ export interface RegionDebugInfo {
     final: [number, number, number, number];
   };
   /** 落入 bbox 的文字項（Phase 3 extractTextFromBbox 收集的 Hit） */
-  hits: { str: string; x: number; y: number; right: number; baseline: number }[];
+  hits: { str: string; x: number; y: number; h: number; right: number; baseline: number }[];
   /** 偵測到的欄數 */
   columns: number;
   /** 多欄分界線位置（僅多欄時有值） */
@@ -42,6 +42,59 @@ export interface RegionDebugInfo {
   symbolicFonts?: Record<string, string>;
   /** 行距中位數 */
   medianLineGap: number;
+  /** Y-overlap 行合併事件（baseline 超出閾值但 Y 範圍重疊而合併的 items） */
+  yOverlapMerges?: { str: string; blDiff: number; overlap: number; toLineIdx: number }[];
+  /** 行碎片重組事件（Step 3.5，超連結等 baseline 偏移導致的碎片合併） */
+  fragmentMerges?: { fromLine: number; toLine: number; combinedXMin: number; combinedXMax: number }[];
+  /** 自適應閾值計算詳情 */
+  adaptiveDetail?: {
+    /** 計算路徑：stable=穩定聚類、fallback=微聚類中位數、none=未觸發 */
+    path: 'stable' | 'fallback' | 'none';
+    /** 穩定聚類數（count≥2 的微聚類） */
+    stableCount?: number;
+    /** 穩定聚類間最小間距 */
+    minStableSpacing?: number;
+    /** 微聚類數 */
+    microClusterCount?: number;
+    /** 微聚類間距中位數 */
+    medianMicroSpacing?: number;
+  };
+  /** 各階段校正過程詳情（bbox 如何從 original 變成 final） */
+  corrections?: {
+    /** Phase 1 snap 校正 */
+    snap: {
+      /** 各座標變化量 [dx1, dy1, dx2, dy2]（負=往左/上擴展，正=往右/下擴展） */
+      delta: [number, number, number, number];
+      /** 迭代次數 */
+      iterations: number;
+      /** 觸發擴展的 text items（每個座標方向的最遠觸發者） */
+      triggers: { str: string; x: number; y: number; w: number; h: number; xRatio: number; expanded: string }[];
+    };
+    /** Phase 2 resolve 跨框衝突 */
+    resolve: {
+      /** 各座標變化量 [dx1, dy1, dx2, dy2] */
+      delta: [number, number, number, number];
+    };
+    /** Phase 2.5 enforce 最小間距 */
+    enforce: {
+      /** 各座標變化量 [dx1, dy1, dx2, dy2] */
+      delta: [number, number, number, number];
+    };
+    /** Phase 2.75 descender 補償 */
+    descender: {
+      /** 各座標變化量 [dx1, dy1, dx2, dy2] */
+      delta: [number, number, number, number];
+    };
+    /** 尺寸變化摘要 */
+    size: {
+      original: { w: number; h: number };
+      final: { w: number; h: number };
+      /** 寬度變化量 */
+      deltaW: number;
+      /** 高度變化量 */
+      deltaH: number;
+    };
+  };
 }
 
 /** 單一標註區域 */
