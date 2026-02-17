@@ -589,12 +589,11 @@ export default function PdfViewer({
                             displayWidth={dim.width}
                             displayHeight={dim.height}
                             isHovered={hoveredRegionId === regionKey}
-                            onHover={() => onHover(regionKey)}
+                            onHover={() => { onHover(regionKey); onBboxClick?.(regionKey); }}
                             onHoverEnd={() => onHover(null)}
                             onUpdate={(newBbox) => onRegionUpdate(pageNum, region.id, newBbox)}
                             onRemove={() => onRegionRemove(pageNum, region.id)}
                             onDoubleClick={() => onRegionDoubleClick(pageNum, region.id)}
-                            onClick={() => onBboxClick?.(regionKey)}
                             showOriginalBbox={showOriginalBbox}
                             pageNumber={pageNum}
                           />

@@ -99,7 +99,7 @@ export default function PDFExtractApp() {
   const [currentPage, setCurrentPage] = useState(1);
   const [hoveredRegionId, setHoveredRegionId] = useState<string | null>(null);
   const [scrollTarget, setScrollTarget] = useState<string | null>(null);
-  /** 點擊 PdfViewer 的 BoundingBox → 讓 TextPanel 滾動到對應文字框 */
+  /** Hover PdfViewer 的 BoundingBox → 讓 TextPanel 滾動到對應文字框 */
   const [scrollToTextKey, setScrollToTextKey] = useState<string | null>(null);
   /** 切換顯示校正前/校正後 bbox（全域，跨檔案共享） */
   const [showOriginalBbox, setShowOriginalBbox] = useState(false);
@@ -375,10 +375,9 @@ export default function PDFExtractApp() {
     requestAnimationFrame(() => setScrollTarget(regionKey));
   }, []);
 
-  // === 點擊 PdfViewer 的 BoundingBox → 滾動 TextPanel 到對應文字框 ===
+  // === Hover PdfViewer 的 BoundingBox → 滾動 TextPanel 到對應文字框 ===
   const handleBboxClick = useCallback((regionKey: string) => {
-    setScrollToTextKey(null);
-    requestAnimationFrame(() => setScrollToTextKey(regionKey));
+    setScrollToTextKey(regionKey);
   }, []);
 
   // === 全頁面拖放 PDF（三區域模式：左=背景跑、中=當前頁並跑、右=僅加入列表）===

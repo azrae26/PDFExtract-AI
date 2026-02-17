@@ -126,14 +126,11 @@ export default function BoundingBox({
     });
   }, [region, displayWidth, displayHeight, pageNumber]);
 
-  // === 按鈕定位：正常往下移 20px；框太小時往右移 15px 並垂直居中 ===
-  const isSmallBox = height < 60;
-  const xBtnStyle: React.CSSProperties = isSmallBox
-    ? { top: height / 2 - 22, right: -25 }
-    : { top: 10, right: -10 };
-  const copyBtnStyle: React.CSSProperties = isSmallBox
-    ? { top: height / 2 + 2, right: -25 }
-    : { top: 34, right: -10 };
+  // === 按鈕定位：一律往右外移；高度足夠時靠上緣，太小時以中線為中心對稱分佈 ===
+  const btnPairHeight = 44; // 20px button + 4px gap + 20px button
+  const groupTop = height >= btnPairHeight ? 0 : height / 2 - btnPairHeight / 2;
+  const xBtnStyle: React.CSSProperties = { top: groupTop, right: -25 };
+  const copyBtnStyle: React.CSSProperties = { top: groupTop + 24, right: -25 };
 
   // 雙擊右鍵刪除
   const lastRightClickRef = useRef(0);
