@@ -280,6 +280,10 @@ function checkOwnership(
   if (!otherBboxes) return true;
 
   for (const other of otherBboxes) {
+    // X 重疊檢查：左右不同欄的框不影響歸屬判斷（避免並排框互相搶文字）
+    const xOverlap = Math.min(myBbox[2], other[2]) - Math.max(myBbox[0], other[0]);
+    if (xOverlap <= 0) continue;
+
     // 計算當前 bbox 和此 otherBbox 的 Y 方向重疊
     const pairOverlapTop = Math.max(myBbox[1], other[1]);
     const pairOverlapBottom = Math.min(myBbox[3], other[3]);
@@ -566,6 +570,178 @@ export function resolveOverlappingLines(
       bboxes[lowerIdx][1] = Math.max(bboxes[lowerIdx][1], line.bottomY);
     }
   }
+}
+
+// ============================================================
+// Phase 2.25: ResolveXOverlaps — 左右歸屬判斷
+// ============================================================
+
+/** baseline 子集比例閾值：較少那邊的 baselines 有此比例以上在較多那邊找到配對 → 可能同區塊 → 需 X 佔比判斷 */
+export const X_SUBSET_RATIO = 0.8;
+
+/**
+ * 左右歸屬判斷：snap 後兩框若有 X 重疊，用 baseline 對齊 + X 佔比決定歸屬，消除 X 重疊
+ * - Step 1: 收集左/右框非重疊區域的 baselines
+ * - Step 2: 計算較少那邊的 baseline 子集比例（有多少在較多那邊找到配對）
+ * - Step 3: subsetRatio < X_SUBSET_RATIO → 不同區塊 → 看誰在重疊區文字多 → 少的退
+ *           subsetRatio >= X_SUBSET_RATIO → 可能同區塊 → X 重疊各退一半 → 比佔比 → 少的退
+ * - Step 4: 退縮結果消除 X 重疊，避免後續 enforce 誤判
+ * 直接修改 bboxes 陣列（in-place）
+ * @returns 每個 bbox 的 resolveX debug 資訊（delta、是否觸發、子集比例、配對對象）
+ */
+/** resolveXOverlaps 每個 bbox 的 debug 資訊 */
+export interface ResolveXDebugEntry {
+  delta: [number, number, number, number];
+  triggered?: boolean;
+  subsetRatio?: number;
+  pairedWith?: number;
+}
+
+export function resolveXOverlaps(
+  bboxes: [number, number, number, number][],
+  textItems: NormTextItem[],
+): ResolveXDebugEntry[] {
+  const debugResults: ResolveXDebugEntry[] = bboxes.map(() => ({
+    delta: [0, 0, 0, 0] as [number, number, number, number],
+  }));
+
+  if (bboxes.length < 2) return debugResults;
+
+  for (let i = 0; i < bboxes.length; i++) {
+    for (let j = i + 1; j < bboxes.length; j++) {
+      // X 方向無重疊則跳過
+      const xOverlapLeft = Math.max(bboxes[i][0], bboxes[j][0]);
+      const xOverlapRight = Math.min(bboxes[i][2], bboxes[j][2]);
+      if (xOverlapRight <= xOverlapLeft) continue;
+
+      // 決定左框 / 右框（x1 較小的是左框）
+      const leftIdx = bboxes[i][0] <= bboxes[j][0] ? i : j;
+      const rightIdx = leftIdx === i ? j : i;
+
+      // Y 方向無重疊也跳過（完全上下不重疊的框即使 X 碰到也不影響）
+      const yOverlapTop = Math.max(bboxes[leftIdx][1], bboxes[rightIdx][1]);
+      const yOverlapBottom = Math.min(bboxes[leftIdx][3], bboxes[rightIdx][3]);
+      if (yOverlapBottom <= yOverlapTop) continue;
+
+      // --- Step 1: 收集左/右框非重疊區域的 baselines ---
+      const leftBaselines = new Set<number>();
+      const rightBaselines = new Set<number>();
+
+      for (const ti of textItems) {
+        const tiCenterX = ti.normX + ti.normW / 2;
+        const tiBaseline = ti.normBaseline;
+
+        // 只看 Y 範圍與兩框都重疊的文字（避免上下方無關文字干擾）
+        if (tiBaseline < yOverlapTop || ti.normY > yOverlapBottom) continue;
+
+        if (tiCenterX < xOverlapLeft) {
+          // 文字中心在左框的非重疊區
+          if (tiCenterX > bboxes[leftIdx][0] && tiCenterX < bboxes[leftIdx][2]) {
+            leftBaselines.add(Math.round(tiBaseline));
+          }
+        } else if (tiCenterX > xOverlapRight) {
+          // 文字中心在右框的非重疊區
+          if (tiCenterX > bboxes[rightIdx][0] && tiCenterX < bboxes[rightIdx][2]) {
+            rightBaselines.add(Math.round(tiBaseline));
+          }
+        }
+      }
+
+      // --- Step 2: 計算 baseline 子集比例 ---
+      // 用較少那邊當分母，看它的 baselines 是否都在較多那邊找得到
+      const leftArr = Array.from(leftBaselines);
+      const rightArr = Array.from(rightBaselines);
+      const smallArr = leftArr.length <= rightArr.length ? leftArr : rightArr;
+      const largeArr = leftArr.length <= rightArr.length ? rightArr : leftArr;
+
+      let matchCount = 0;
+      if (smallArr.length > 0) {
+        for (const bl of smallArr) {
+          if (largeArr.some(other => Math.abs(bl - other) < SAME_LINE_THRESHOLD)) {
+            matchCount++;
+          }
+        }
+      }
+      const subsetRatio = smallArr.length > 0 ? matchCount / smallArr.length : 1;
+
+      // --- Step 3: 判定歸屬 + 退縮 ---
+      let leftCoverage = 0;
+      let rightCoverage = 0;
+
+      if (subsetRatio >= X_SUBSET_RATIO) {
+        // 可能同區塊 → X 重疊各退一半 → 比佔比
+        const midX = (xOverlapLeft + xOverlapRight) / 2;
+
+        for (const ti of textItems) {
+          const tiRight = ti.normX + ti.normW;
+          // 文字必須在重疊區內
+          if (tiRight <= xOverlapLeft || ti.normX >= xOverlapRight) continue;
+          // 也要在 Y 重疊範圍內
+          if (ti.normBaseline < yOverlapTop || ti.normY > yOverlapBottom) continue;
+
+          const tiCenterX = ti.normX + ti.normW / 2;
+          if (tiCenterX < midX) {
+            leftCoverage += Math.min(tiRight, midX) - Math.max(ti.normX, xOverlapLeft);
+          } else {
+            rightCoverage += Math.min(tiRight, xOverlapRight) - Math.max(ti.normX, midX);
+          }
+        }
+      } else {
+        // 不同區塊 → 直接統計重疊區的文字覆蓋量
+        for (const ti of textItems) {
+          const tiRight = ti.normX + ti.normW;
+          if (tiRight <= xOverlapLeft || ti.normX >= xOverlapRight) continue;
+          if (ti.normBaseline < yOverlapTop || ti.normY > yOverlapBottom) continue;
+
+          const tiCenterX = ti.normX + ti.normW / 2;
+          const overlapAmount = Math.min(tiRight, xOverlapRight) - Math.max(ti.normX, xOverlapLeft);
+          if (tiCenterX < (xOverlapLeft + xOverlapRight) / 2) {
+            leftCoverage += overlapAmount;
+          } else {
+            rightCoverage += overlapAmount;
+          }
+        }
+      }
+
+      // --- Step 4: 退縮 —— 覆蓋量少的一方退讓，消除 X 重疊 ---
+      const beforeLeft = [...bboxes[leftIdx]] as [number, number, number, number];
+      const beforeRight = [...bboxes[rightIdx]] as [number, number, number, number];
+
+      if (leftCoverage >= rightCoverage) {
+        // 左框覆蓋更多 → 右框退讓（右框 x1 推到左框 x2）
+        bboxes[rightIdx][0] = bboxes[leftIdx][2];
+      } else {
+        // 右框覆蓋更多 → 左框退讓（左框 x2 推到右框 x1）
+        bboxes[leftIdx][2] = bboxes[rightIdx][0];
+      }
+
+      // 記錄 debug
+      debugResults[leftIdx] = {
+        delta: [
+          bboxes[leftIdx][0] - beforeLeft[0],
+          bboxes[leftIdx][1] - beforeLeft[1],
+          bboxes[leftIdx][2] - beforeLeft[2],
+          bboxes[leftIdx][3] - beforeLeft[3],
+        ],
+        triggered: true,
+        subsetRatio: Math.round(subsetRatio * 100) / 100,
+        pairedWith: rightIdx,
+      };
+      debugResults[rightIdx] = {
+        delta: [
+          bboxes[rightIdx][0] - beforeRight[0],
+          bboxes[rightIdx][1] - beforeRight[1],
+          bboxes[rightIdx][2] - beforeRight[2],
+          bboxes[rightIdx][3] - beforeRight[3],
+        ],
+        triggered: true,
+        subsetRatio: Math.round(subsetRatio * 100) / 100,
+        pairedWith: leftIdx,
+      };
+    }
+  }
+
+  return debugResults;
 }
 
 // ============================================================

@@ -6,7 +6,7 @@
 
 'use client';
 
-import { useRef, useState, useCallback } from 'react';
+import { useRef, useState, useCallback, useEffect } from 'react';
 import { Rnd } from 'react-rnd';
 import { Region } from '@/lib/types';
 import { getBoxColor, EMPTY_BOX_COLOR, NORMALIZED_MAX } from '@/lib/constants';
@@ -92,6 +92,28 @@ export default function BoundingBox({
   const activeBbox = useOriginal ? region.originalBbox! : region.bbox;
   const { x, y, width, height } = normalizedToPixel(activeBbox, displayWidth, displayHeight);
 
+  // === Hover 延遲：防止滑鼠從框移向按鈕時 z-index 瞬間下降導致按鈕被鄰框遮蓋 ===
+  const unhoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const handleMouseEnter = useCallback(() => {
+    if (unhoverTimerRef.current) {
+      clearTimeout(unhoverTimerRef.current);
+      unhoverTimerRef.current = null;
+    }
+    onHover();
+  }, [onHover]);
+  const handleMouseLeave = useCallback(() => {
+    unhoverTimerRef.current = setTimeout(() => {
+      onHoverEnd();
+      unhoverTimerRef.current = null;
+    }, 200);
+  }, [onHoverEnd]);
+  // cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (unhoverTimerRef.current) clearTimeout(unhoverTimerRef.current);
+    };
+  }, []);
+
   // Debug 複製狀態
   const [debugCopied, setDebugCopied] = useState(false);
   const handleCopyDebug = useCallback((e: React.MouseEvent) => {
@@ -170,7 +192,7 @@ export default function BoundingBox({
         onUpdate(newBbox);
       }}
       disableDragging={!!useOriginal}
-      style={{ zIndex: isHovered ? 20 : 10 }}
+      style={{ zIndex: isHovered ? 50 : 10 }}
       enableResizing={useOriginal ? false : {
         top: true,
         right: true,
@@ -190,8 +212,8 @@ export default function BoundingBox({
           borderRadius: '2px',
           boxShadow: isHovered ? `0 0 0 1px ${color.border}, 0 2px 8px rgba(0,0,0,0.15)` : 'none',
         }}
-        onMouseEnter={onHover}
-        onMouseLeave={onHoverEnd}
+        onMouseEnter={handleMouseEnter}
+        onMouseLeave={handleMouseLeave}
         onContextMenu={handleContextMenu}
         onClick={(e) => {
           e.stopPropagation();
@@ -202,10 +224,18 @@ export default function BoundingBox({
           onDoubleClick();
         }}
       >
+        {/* 按鈕 hover 延伸區：透明區塊從框右邊緣延伸到按鈕，消除 hover 間隙 */}
+        <div
+          className="absolute opacity-0 group-hover:opacity-100 transition-opacity z-30"
+          style={{ top: groupTop - 2, right: -28, width: 30, height: btnPairHeight + 4 }}
+          onMouseEnter={handleMouseEnter}
+        />
+
         {/* X 刪除按鈕 */}
         <button
           className="absolute w-5 h-5 rounded-full flex items-center justify-center text-white text-xs font-bold opacity-0 hover:opacity-100 group-hover:opacity-80 transition-opacity cursor-pointer z-30"
           style={{ ...xBtnStyle, backgroundColor: color.border }}
+          onMouseEnter={handleMouseEnter}
           onMouseDown={(e) => {
             e.stopPropagation(); // 防止觸發 Rnd 的拖動
             onRemove();
@@ -219,6 +249,7 @@ export default function BoundingBox({
         <button
           className="absolute w-5 h-5 rounded-full flex items-center justify-center text-white text-[9px] font-bold opacity-0 hover:opacity-100 group-hover:opacity-60 transition-opacity cursor-pointer z-30"
           style={{ ...copyBtnStyle, backgroundColor: debugCopied ? '#22c55e' : '#6b7280' }}
+          onMouseEnter={handleMouseEnter}
           onMouseDown={(e) => {
             e.stopPropagation();
             handleCopyDebug(e);

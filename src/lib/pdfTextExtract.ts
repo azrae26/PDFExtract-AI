@@ -1,7 +1,7 @@
 /**
  * 功能：從 PDF 頁面的文字層中，根據 bounding box 座標提取文字，並自動校正不完整的 bbox
  * 職責：接收 pdfjs PDFPageProxy + Region[]，利用 getTextContent() 取得文字項，
- *       呼叫 pdfTextExtractCore 的純函式完成 snap → enforce → descender → extract 流程，
+ *       呼叫 pdfTextExtractCore 的純函式完成 snap → resolveXOverlaps → enforce → descender → extract 流程，
  *       並在各 phase 間快照 bbox 供 debug 診斷
  *       本檔案僅負責 pdfjs 的 IO 層（getTextContent + 座標轉換），所有演算法在 core 中
  * 依賴：pdfjs-dist (PDFPageProxy)、pdfTextExtractCore（純演算法）、types.ts（RegionDebugInfo）
@@ -14,6 +14,7 @@ import {
   NORMALIZED_MAX,
   _ts,
   snapBboxToText,
+  resolveXOverlaps,
   enforceMinVerticalGap,
   applyDescenderCompensation,
   extractTextFromBbox,
@@ -148,6 +149,13 @@ export async function extractTextForRegions(
   // Debug 快照：保留 afterResolve 欄位以維持 debug 結構向後相容
   const afterResolve = afterSnap;
 
+  // === Phase 2.25: 左右歸屬 — 解決 snap 後的 X 方向重疊 ===
+  const resolveXDebug = resolveXOverlaps(snappedBboxes, textItems);
+  // Debug 快照：resolveX 後
+  const afterResolveX: [number, number, number, number][] = snappedBboxes.map(
+    b => [...b] as [number, number, number, number]
+  );
+
   // === Phase 2.5: 保證框間最小垂直間距 ===
   enforceMinVerticalGap(snappedBboxes);
   // Debug 快照：enforce 後
@@ -184,6 +192,7 @@ export async function extractTextForRegions(
         original: rnd(region.bbox),
         afterSnap: rnd(afterSnap[i]),
         afterResolve: rnd(afterResolve[i]),
+        afterResolveX: rnd(afterResolveX[i]),
         afterEnforce: rnd(afterEnforce[i]),
         final: rnd(finalBbox),
       },
@@ -228,7 +237,13 @@ export async function extractTextForRegions(
         })),
       },
       resolve: { delta: phaseDelta(snap, resolve) },
-      enforce: { delta: phaseDelta(resolve, enforce) },
+      resolveX: {
+        delta: phaseDelta(resolve, afterResolveX[i]),
+        triggered: resolveXDebug[i].triggered,
+        subsetRatio: resolveXDebug[i].subsetRatio,
+        pairedWith: resolveXDebug[i].pairedWith,
+      },
+      enforce: { delta: phaseDelta(afterResolveX[i], enforce) },
       descender: { delta: phaseDelta(enforce, final_) },
       size: {
         original: { w: r1(orig[2] - orig[0]), h: r1(orig[3] - orig[1]) },

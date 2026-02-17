@@ -56,9 +56,9 @@ export default function TextPanel({
     overIndex: number;
   } | null>(null);
 
-  // === 自動滾動：PdfViewer 點擊 BoundingBox → 右欄滾動到對應文字框 ===
-  // useEffect 監聽 scrollToRegionKey → lerp 動畫滾到 15~85% 區間
-  // skipScrollRef 標記滑鼠在 TextPanel 上（onMouseEnter 設 true、onMouseLeave 設 false）
+  // === 自動滾動：PdfViewer 點擊/hover BoundingBox → 右欄滾動到對應文字框 ===
+  // useEffect 監聯 scrollToRegionKey / hoveredRegionId → lerp 動畫滾到 15~85% 區間（但不讓另一端超出畫面）
+  // skipScrollRef 標記滑鼠在 TextPanel 上（onMouseEnter 設 true、onMouseLeave 設 false），避免 hover 迴圈
   const scrollTargetRef = useRef<number | null>(null);
   const scrollRafRef = useRef<number>(0);
   const skipScrollRef = useRef(false);
@@ -116,13 +116,9 @@ export default function TextPanel({
     return () => container.removeEventListener('wheel', handleWheel);
   }, []);
 
-  // 路徑 1：PdfViewer 點擊 BoundingBox 連動 → 滾到 15~85% 區間
-  useEffect(() => {
-    if (!scrollToRegionKey) {
-      scrollTargetRef.current = null;
-      return;
-    }
-    const el = regionRefs.current.get(scrollToRegionKey);
+  // 共用：計算並啟動滾動到指定 regionKey（拉到 15~85% 區間，但不讓元素另一端超出畫面）
+  const scrollToRegion = useCallback((regionKey: string) => {
+    const el = regionRefs.current.get(regionKey);
     const container = scrollContainerRef.current;
     if (!el || !container) return;
 
@@ -132,19 +128,42 @@ export default function TextPanel({
     const elTopInContainer = elRect.top - containerRect.top;
     const elBottomInContainer = elRect.bottom - containerRect.top;
 
-    const zone20 = containerHeight * 0.15;
-    const zone80 = containerHeight * 0.85;
+    const zone15 = containerHeight * 0.15;
+    const zone85 = containerHeight * 0.85;
 
     let scrollDelta = 0;
-    if (elTopInContainer < zone20) {
-      scrollDelta = elTopInContainer - zone20;
-    } else if (elBottomInContainer > zone80) {
-      scrollDelta = elBottomInContainer - zone80;
+    if (elBottomInContainer > zone85) {
+      // 文字框在下方 → 底部拉到 85%
+      scrollDelta = elBottomInContainer - zone85;
+      // 但如果頂部會超過畫面上方，最多只能頂到上方邊界
+      const newTop = elTopInContainer - scrollDelta;
+      if (newTop < 0) {
+        scrollDelta = Math.max(0, elTopInContainer);
+      }
+    } else if (elTopInContainer < zone15) {
+      // 文字框在上方 → 頂部拉到 15%
+      scrollDelta = elTopInContainer - zone15;
+      // 但如果底部會超過畫面下方，最多只能頂到下方邊界
+      const newBottom = elBottomInContainer - scrollDelta;
+      if (newBottom > containerHeight) {
+        scrollDelta = Math.min(0, elBottomInContainer - containerHeight);
+      }
     } else {
-      return;
+      return; // 已在 15~85% 區間內
     }
 
-    animateScrollTo(container.scrollTop + scrollDelta);
+    if (Math.abs(scrollDelta) > 0.5) {
+      animateScrollTo(container.scrollTop + scrollDelta);
+    }
+  }, [animateScrollTo]);
+
+  // 路徑 1：PdfViewer 點擊 BoundingBox → 右欄滾到對應文字框
+  useEffect(() => {
+    if (!scrollToRegionKey) {
+      scrollTargetRef.current = null;
+      return;
+    }
+    scrollToRegion(scrollToRegionKey);
 
     return () => {
       if (scrollRafRef.current) {
@@ -152,7 +171,13 @@ export default function TextPanel({
         scrollRafRef.current = 0;
       }
     };
-  }, [scrollToRegionKey, animateScrollTo]);
+  }, [scrollToRegionKey, scrollToRegion]);
+
+  // 路徑 2：Hover PdfViewer BoundingBox → 右欄自動滾到對應文字框（滑鼠在 TextPanel 上時跳過，避免迴圈）
+  useEffect(() => {
+    if (!hoveredRegionId || skipScrollRef.current) return;
+    scrollToRegion(hoveredRegionId);
+  }, [hoveredRegionId, scrollToRegion]);
 
 
   // 複製全部文字到剪貼簿

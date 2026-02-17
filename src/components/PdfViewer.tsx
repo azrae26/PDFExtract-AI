@@ -80,6 +80,10 @@ export default function PdfViewer({
   const containerRef = useRef<HTMLDivElement>(null);
   const [pageWidth, setPageWidth] = useState(600);
 
+  // 追蹤最新 hoveredRegionId，供 BoundingBox 延遲 onHoverEnd 判斷「目前 hover 的是否還是自己」
+  const hoveredRegionIdRef = useRef(hoveredRegionId);
+  hoveredRegionIdRef.current = hoveredRegionId;
+
   // 每頁容器的 ref（用於 scrollIntoView）
   const pageElRefs = useRef<Map<number, HTMLDivElement>>(new Map());
   // 滾動容器 ref
@@ -590,7 +594,7 @@ export default function PdfViewer({
                             displayHeight={dim.height}
                             isHovered={hoveredRegionId === regionKey}
                             onHover={() => { onHover(regionKey); onBboxClick?.(regionKey); }}
-                            onHoverEnd={() => onHover(null)}
+                            onHoverEnd={() => { if (hoveredRegionIdRef.current === regionKey) onHover(null); }}
                             onUpdate={(newBbox) => onRegionUpdate(pageNum, region.id, newBbox)}
                             onRemove={() => onRegionRemove(pageNum, region.id)}
                             onDoubleClick={() => onRegionDoubleClick(pageNum, region.id)}

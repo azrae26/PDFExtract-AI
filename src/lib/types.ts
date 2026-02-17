@@ -15,6 +15,8 @@ export interface RegionDebugInfo {
     afterSnap: [number, number, number, number];
     /** Phase 2: resolve 跨框衝突解決後 */
     afterResolve: [number, number, number, number];
+    /** Phase 2.25: resolveXOverlaps 左右歸屬解決後 */
+    afterResolveX?: [number, number, number, number];
     /** Phase 2.5: enforce 最小間距保證後 */
     afterEnforce: [number, number, number, number];
     /** 最終（Phase 2.75 descender 補償後） */
@@ -74,6 +76,17 @@ export interface RegionDebugInfo {
     resolve: {
       /** 各座標變化量 [dx1, dy1, dx2, dy2] */
       delta: [number, number, number, number];
+    };
+    /** Phase 2.25 resolveXOverlaps 左右歸屬 */
+    resolveX: {
+      /** 各座標變化量 [dx1, dy1, dx2, dy2] */
+      delta: [number, number, number, number];
+      /** 是否觸發左右歸屬解決 */
+      triggered?: boolean;
+      /** baseline 子集比例（較少那邊的 baselines 有多少吻合） */
+      subsetRatio?: number;
+      /** 與哪個 region index 做了左右歸屬比較 */
+      pairedWith?: number;
     };
     /** Phase 2.5 enforce 最小間距 */
     enforce: {
