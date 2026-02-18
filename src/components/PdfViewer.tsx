@@ -6,7 +6,7 @@
 
 'use client';
 
-import { useState, useRef, useCallback, useEffect, useMemo, MouseEvent as ReactMouseEvent, KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { useState, useRef, useCallback, useEffect, useMemo, MouseEvent as ReactMouseEvent } from 'react';
 import { Document, Page, pdfjs } from 'react-pdf';
 import 'react-pdf/dist/Page/AnnotationLayer.css';
 import BoundingBox from './BoundingBox';
@@ -350,7 +350,12 @@ export default function PdfViewer({
   onRemoveAllRegionsRef.current = onRemoveAllRegions;
   const pageRegionsRef = useRef(pageRegions);
   pageRegionsRef.current = pageRegions;
+  const pdfUrlRef = useRef(pdfUrl);
+  pdfUrlRef.current = pdfUrl;
+  const pageWidthRef = useRef(pageWidth);
+  pageWidthRef.current = pageWidth;
 
+  // 全域快捷鍵（不需焦點，滑鼠指到 PDF 頁面即可）
   useEffect(() => {
     const handleGlobalKeyDown = (e: KeyboardEvent) => {
       if (hoveredPageRef.current === null) return;
@@ -381,31 +386,23 @@ export default function PdfViewer({
         }
         return;
       }
-    };
 
-    document.addEventListener('keydown', handleGlobalKeyDown);
-    return () => document.removeEventListener('keydown', handleGlobalKeyDown);
-  }, []);
-
-  // 空格鍵：下一頁；S 鍵：上一頁（需焦點在 scrollRef 上）
-  const handleKeyDown = useCallback(
-    (e: ReactKeyboardEvent) => {
-      const scrollEl = scrollRef.current;
-      if (!scrollEl || !pdfUrl) return;
-
+      // Space / S / W：捲動一頁（不需焦點）
       let delta = 0;
       if (e.key === ' ') {
         delta = e.shiftKey ? -1 : 1;
-      } else if (e.key === 's' || e.key === 'S') {
-        delta = -1; // S = 上一頁
+      } else if (e.key === 's' || e.key === 'S' || e.key === 'w' || e.key === 'W') {
+        delta = -1;
       } else {
         return;
       }
 
+      const scrollEl = scrollRef.current;
+      if (!scrollEl || !pdfUrlRef.current) return;
       e.preventDefault();
+
       const scrollTop = scrollEl.scrollTop;
       const viewportCenter = scrollTop + scrollEl.clientHeight / 2;
-
       let pageHeight = 0;
       const sortedPages = Array.from(pageElRefs.current.keys()).sort((a, b) => a - b);
       for (const pageNum of sortedPages) {
@@ -420,17 +417,18 @@ export default function PdfViewer({
       }
       if (pageHeight === 0 && sortedPages.length > 0) {
         const firstEl = pageElRefs.current.get(sortedPages[0]);
-        pageHeight = firstEl?.offsetHeight ?? pageWidth * DEFAULT_RATIO;
+        pageHeight = firstEl?.offsetHeight ?? pageWidthRef.current * DEFAULT_RATIO;
       }
-
       if (pageHeight <= 0) return;
 
       const scrollDelta = delta * pageHeight;
       const target = Math.max(0, Math.min(scrollEl.scrollHeight - scrollEl.clientHeight, scrollTop + scrollDelta));
       scrollEl.scrollTop = target;
-    },
-    [pdfUrl, pageWidth]
-  );
+    };
+
+    document.addEventListener('keydown', handleGlobalKeyDown);
+    return () => document.removeEventListener('keydown', handleGlobalKeyDown);
+  }, []);
 
   // 計算可視區域上方/下方的 region 數量
   const updateAboveBelowCounts = useCallback(() => {
@@ -533,9 +531,8 @@ export default function PdfViewer({
         tabIndex={0}
         role="region"
         aria-label="PDF 預覽"
-        className="flex-1 overflow-y-auto overflow-x-hidden flex flex-col items-center pt-3 px-6 pb-6 gap-4 w-full outline-none focus:ring-2 focus:ring-blue-400 focus:ring-inset"
+        className="flex-1 overflow-y-auto overflow-x-hidden flex flex-col items-center pt-3 px-6 pb-6 gap-4 w-full outline-none"
         style={{ overflowAnchor: 'none' }}
-        onKeyDown={handleKeyDown}
       >
         {pdfUrl ? (
           <Document
@@ -766,6 +763,20 @@ export default function PdfViewer({
           ↓ 下方還有 {belowCount} 個框
         </div>
       )}
+
+      {/* 左下角快捷鍵說明（小圈 hover 顯示） */}
+      <div className="absolute bottom-2 left-2 z-30 group">
+        <div className="w-[31px] h-[31px] rounded-full bg-indigo-500 hover:bg-indigo-600 text-white flex items-center justify-center text-base font-bold cursor-help shadow-md">
+          ?
+        </div>
+        <div className="absolute left-0 bottom-full mb-1 hidden group-hover:block w-max max-w-[200px] p-2 rounded bg-gray-800/95 text-white text-xs leading-relaxed shadow-lg">
+          <div className="font-semibold mb-1.5">快捷鍵（滑鼠指到某頁）</div>
+          <div>Space：下一頁</div>
+          <div>S 或 W：上一頁</div>
+          <div>Ctrl×2：重跑該頁</div>
+          <div>Alt×2：刪除該頁框</div>
+        </div>
+      </div>
     </div>
   );
 }
