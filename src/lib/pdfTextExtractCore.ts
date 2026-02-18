@@ -681,6 +681,10 @@ export function resolveXOverlaps(
         }
       }
 
+      // 兩邊 baselines 都是空的 → X 非重疊區沒有文字
+      // → 兩框是上下堆疊（X 完全重疊）而非左右並排，交由 enforce 處理 Y 重疊
+      if (leftBaselines.size === 0 && rightBaselines.size === 0) continue;
+
       // --- Step 2: 計算 baseline 子集比例 ---
       // 用較少那邊當分母，看它的 baselines 是否都在較多那邊找得到
       const leftArr = Array.from(leftBaselines);

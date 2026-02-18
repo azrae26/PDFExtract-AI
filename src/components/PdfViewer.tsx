@@ -6,7 +6,7 @@
 
 'use client';
 
-import { useState, useRef, useCallback, useEffect, useMemo, MouseEvent as ReactMouseEvent } from 'react';
+import { useState, useRef, useCallback, useEffect, useMemo, MouseEvent as ReactMouseEvent, KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { Document, Page, pdfjs } from 'react-pdf';
 import 'react-pdf/dist/Page/AnnotationLayer.css';
 import BoundingBox from './BoundingBox';
@@ -330,6 +330,108 @@ export default function PdfViewer({
     return () => scrollEl.removeEventListener('wheel', handleWheel);
   }, []);
 
+  // 追蹤滑鼠目前指向哪一頁（ref 供快捷鍵讀取 + state 供 hover 視覺效果）
+  const hoveredPageRef = useRef<number | null>(null);
+  const [hoveredPage, setHoveredPage] = useState<number | null>(null);
+
+  const setHoveredPageNum = useCallback((pageNum: number | null) => {
+    hoveredPageRef.current = pageNum;
+    setHoveredPage(pageNum);
+  }, []);
+
+  // Ctrl / Alt 連按兩下偵測（document 層級，不需焦點）
+  const lastCtrlRef = useRef(0);
+  const lastAltRef = useRef(0);
+  const DOUBLE_TAP_MS = 400;
+
+  const onReanalyzePageRef = useRef(onReanalyzePage);
+  onReanalyzePageRef.current = onReanalyzePage;
+  const onRemoveAllRegionsRef = useRef(onRemoveAllRegions);
+  onRemoveAllRegionsRef.current = onRemoveAllRegions;
+  const pageRegionsRef = useRef(pageRegions);
+  pageRegionsRef.current = pageRegions;
+
+  useEffect(() => {
+    const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      if (hoveredPageRef.current === null) return;
+
+      if (e.key === 'Control') {
+        const now = Date.now();
+        if (now - lastCtrlRef.current < DOUBLE_TAP_MS) {
+          onReanalyzePageRef.current(hoveredPageRef.current);
+          lastCtrlRef.current = 0;
+        } else {
+          lastCtrlRef.current = now;
+        }
+        return;
+      }
+
+      if (e.key === 'Alt') {
+        e.preventDefault();
+        const now = Date.now();
+        if (now - lastAltRef.current < DOUBLE_TAP_MS) {
+          const page = hoveredPageRef.current;
+          const regions = pageRegionsRef.current.get(page);
+          if (regions && regions.length > 0) {
+            onRemoveAllRegionsRef.current(page);
+          }
+          lastAltRef.current = 0;
+        } else {
+          lastAltRef.current = now;
+        }
+        return;
+      }
+    };
+
+    document.addEventListener('keydown', handleGlobalKeyDown);
+    return () => document.removeEventListener('keydown', handleGlobalKeyDown);
+  }, []);
+
+  // 空格鍵：下一頁；S 鍵：上一頁（需焦點在 scrollRef 上）
+  const handleKeyDown = useCallback(
+    (e: ReactKeyboardEvent) => {
+      const scrollEl = scrollRef.current;
+      if (!scrollEl || !pdfUrl) return;
+
+      let delta = 0;
+      if (e.key === ' ') {
+        delta = e.shiftKey ? -1 : 1;
+      } else if (e.key === 's' || e.key === 'S') {
+        delta = -1; // S = 上一頁
+      } else {
+        return;
+      }
+
+      e.preventDefault();
+      const scrollTop = scrollEl.scrollTop;
+      const viewportCenter = scrollTop + scrollEl.clientHeight / 2;
+
+      let pageHeight = 0;
+      const sortedPages = Array.from(pageElRefs.current.keys()).sort((a, b) => a - b);
+      for (const pageNum of sortedPages) {
+        const pageEl = pageElRefs.current.get(pageNum);
+        if (!pageEl) continue;
+        const pageTop = pageEl.offsetTop;
+        const ph = pageEl.offsetHeight;
+        if (viewportCenter >= pageTop && viewportCenter < pageTop + ph) {
+          pageHeight = ph;
+          break;
+        }
+      }
+      if (pageHeight === 0 && sortedPages.length > 0) {
+        const firstEl = pageElRefs.current.get(sortedPages[0]);
+        pageHeight = firstEl?.offsetHeight ?? pageWidth * DEFAULT_RATIO;
+      }
+
+      if (pageHeight <= 0) return;
+
+      const scrollDelta = delta * pageHeight;
+      const target = Math.max(0, Math.min(scrollEl.scrollHeight - scrollEl.clientHeight, scrollTop + scrollDelta));
+      scrollEl.scrollTop = target;
+    },
+    [pdfUrl, pageWidth]
+  );
+
   // 計算可視區域上方/下方的 region 數量
   const updateAboveBelowCounts = useCallback(() => {
     const scrollEl = scrollRef.current;
@@ -425,8 +527,16 @@ export default function PdfViewer({
       ref={containerRef}
       className="h-full relative flex flex-col items-center bg-gray-100 overflow-hidden"
     >
-      {/* PDF 連續顯示區域 */}
-      <div ref={scrollRef} className="flex-1 overflow-y-auto overflow-x-hidden flex flex-col items-center pt-3 px-6 pb-6 gap-4 w-full" style={{ overflowAnchor: 'none' }}>
+      {/* PDF 連續顯示區域（tabIndex 使空格鍵可觸發自訂捲動） */}
+      <div
+        ref={scrollRef}
+        tabIndex={0}
+        role="region"
+        aria-label="PDF 預覽"
+        className="flex-1 overflow-y-auto overflow-x-hidden flex flex-col items-center pt-3 px-6 pb-6 gap-4 w-full outline-none focus:ring-2 focus:ring-blue-400 focus:ring-inset"
+        style={{ overflowAnchor: 'none' }}
+        onKeyDown={handleKeyDown}
+      >
         {pdfUrl ? (
           <Document
             file={pdfUrl}
@@ -447,13 +557,17 @@ export default function PdfViewer({
               const ratio = pageRatiosRef.current.get(pageNum) ?? DEFAULT_RATIO;
               const placeholderHeight = pageWidth * ratio;
 
+              const isPageHovered = hoveredPage === pageNum;
+
               return (
                 <div
                   key={pageNum}
                   data-pagenum={pageNum}
                   ref={(el) => setPageRef(pageNum, el)}
-                  className="relative inline-block shadow-lg mb-2 overflow-visible"
+                  className={`relative inline-block shadow-lg mb-2 overflow-visible transition-shadow duration-150 ${isPageHovered ? 'ring-3 ring-blue-400/70' : ''}`}
                   style={{ contain: 'layout style', minHeight: placeholderHeight }}
+                  onMouseEnter={() => setHoveredPageNum(pageNum)}
+                  onMouseLeave={() => { if (hoveredPageRef.current === pageNum) setHoveredPageNum(null); }}
                 >
                   {/* 頁碼標籤 */}
                   <div className="absolute -top-0 left-0 bg-gray-700/70 text-white text-xs px-2 py-0.5 rounded-br z-10">
