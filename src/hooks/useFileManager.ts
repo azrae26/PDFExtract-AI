@@ -580,12 +580,26 @@ export default function useFileManager({
     if (!initializedRef.current) return;
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     saveTimerRef.current = setTimeout(() => {
+      saveTimerRef.current = null;
       saveSession(activeFileId, files);
     }, 2000);
     return () => {
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     };
   }, [files, activeFileId]);
+
+  // === beforeunload：頁面卸載前 flush pending save ===
+  useEffect(() => {
+    const handleBeforeUnload = () => {
+      if (saveTimerRef.current) {
+        clearTimeout(saveTimerRef.current);
+        saveTimerRef.current = null;
+        saveSession(activeFileIdRef.current, filesRef.current);
+      }
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, []);
 
   // === 處理佇列中的下一個檔案 ===
   // 不自動切換 activeFileId（使用者留在目前檢視的檔案），僅在無活躍檔案時才設定

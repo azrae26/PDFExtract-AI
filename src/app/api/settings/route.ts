@@ -48,32 +48,36 @@ export async function GET(): Promise<NextResponse> {
   }
 }
 
-/** POST /api/settings — 寫入伺服器端設定（需密碼驗證） */
+/** POST /api/settings — 寫入伺服器端設定（需密碼驗證，開發模式免密碼） */
 export async function POST(request: NextRequest): Promise<NextResponse> {
   const timestamp = new Date().toLocaleTimeString('en-US', { hour12: false });
 
   try {
-    const serverPassword = process.env.SETTINGS_PASSWORD;
-
-    // 環境變數未設定 → 功能未啟用
-    if (!serverPassword) {
-      console.warn(`[SettingsRoute][${timestamp}] ⚠️ SETTINGS_PASSWORD not configured`);
-      return NextResponse.json(
-        { success: false, error: '伺服器未設定 SETTINGS_PASSWORD，上傳功能未啟用' },
-        { status: 503 }
-      );
-    }
-
     const body = await request.json();
     const { password, settings } = body;
 
-    // 密碼驗證
-    if (!password || password !== serverPassword) {
-      console.warn(`[SettingsRoute][${timestamp}] ❌ Invalid password attempt`);
-      return NextResponse.json(
-        { success: false, error: '密碼錯誤' },
-        { status: 401 }
-      );
+    // 開發模式跳過密碼驗證（next dev 自動設定 NODE_ENV=development）
+    const isDev = process.env.NODE_ENV === 'development';
+    if (!isDev) {
+      const serverPassword = process.env.SETTINGS_PASSWORD;
+
+      // 環境變數未設定 → 功能未啟用
+      if (!serverPassword) {
+        console.warn(`[SettingsRoute][${timestamp}] ⚠️ SETTINGS_PASSWORD not configured`);
+        return NextResponse.json(
+          { success: false, error: '伺服器未設定 SETTINGS_PASSWORD，上傳功能未啟用' },
+          { status: 503 }
+        );
+      }
+
+      // 密碼驗證
+      if (!password || password !== serverPassword) {
+        console.warn(`[SettingsRoute][${timestamp}] ❌ Invalid password attempt`);
+        return NextResponse.json(
+          { success: false, error: '密碼錯誤' },
+          { status: 401 }
+        );
+      }
     }
 
     // 驗證 settings 是物件

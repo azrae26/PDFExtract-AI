@@ -38,6 +38,21 @@ body {
   background: #9ca3af;
 }
 
+/* PDF 區域文字框出現動畫：尺寸 + 透明度漸入 */
+@keyframes region-fade-in {
+  from {
+    opacity: 0;
+    transform: scale(0);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+.animate-region-in {
+  animation: region-fade-in 0.25s ease forwards;
+}
+
 /* 沙漏翻轉動畫：轉 180° → 停頓 → 再轉 180° → 停頓（共 3 秒） */
 @keyframes hourglass-flip {
   0%   { transform: rotate(0deg); }

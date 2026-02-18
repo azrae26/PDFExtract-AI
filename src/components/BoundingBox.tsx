@@ -205,7 +205,7 @@ export default function BoundingBox({
       }}
     >
       <div
-        className={`w-full h-full transition-all duration-150 group ${useOriginal ? 'cursor-default' : 'cursor-move'}`}
+        className={`w-full h-full transition-all duration-150 group animate-region-in ${useOriginal ? 'cursor-default' : 'cursor-move'}`}
         style={{
           border: `2px ${useOriginal ? 'dashed' : 'solid'} ${color.border}`,
           backgroundColor: isHovered ? color.hoverBg : color.bg,

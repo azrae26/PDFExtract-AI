@@ -93,9 +93,13 @@ export const SAME_LINE_THRESHOLD = 15;
 export const MIN_VERTICAL_GAP = 5;
 /** 降部補償比例：PDF 文字項 height 通常為 em height，降部約佔 20%（依字型而異） */
 export const DESCENDER_RATIO = 0.20;
+/** CJK（中文）降部補償比例：中文字無 g/p/q/y 等降部字母，降部量較小 */
+export const DESCENDER_RATIO_CJK = 0.10;
 /** 上方視覺留白比例：em square 頂部到文字視覺上緣的估計距離（佔 normH 的比例）
  *  snap 擴展 y1 時用 normY + normH × 此值 取代 normY，減少上方留白 */
 export const VISUAL_TOP_RATIO = 0.25;
+/** CJK（中文）上方視覺留白比例：中文字結構較方正，上方留白較小 */
+export const VISUAL_TOP_RATIO_CJK = 0.10;
 /** 下方視覺延伸比例：baseline 以下文字延伸到的估計距離（佔 normH 的比例）
  *  snap 擴展 y2 時用 tiBottom + normH × 此值 取代 tiBottom，補足 descender 初始量 */
 export const VISUAL_BOTTOM_RATIO = 0.05;
@@ -196,6 +200,12 @@ export const PARA_WINDOW = 3;
 
 /** Debug log 用時間戳 */
 export const _ts = () => new Date().toLocaleTimeString('en-US', { hour12: false });
+
+/** 偵測字串是否含 CJK 統一漢字（中文），用於選擇 CJK-specific 常數 */
+const CJK_REGEX = /[\u4E00-\u9FFF\u3400-\u4DBF\uF900-\uFAFF]/;
+export function hasCJK(str: string): boolean {
+  return CJK_REGEX.test(str);
+}
 
 /** 將 PUA 字元替換為可顯示的標準符號，未登錄的 PUA 字元以 ● 代替 */
 export function sanitizePuaChars(text: string): string {
@@ -383,7 +393,8 @@ export function snapBboxToText(
       // PDF 的 textItem height = em height（只到 baseline），不含 g/p/q/y 等字母的降部。
       // 當框的 y1 碰到降部區域（baseline 和視覺底部之間）時，座標上無交集但視覺上有重疊，
       // 擴展 tiBottom 讓「碰到降部」也觸發自動擴張。
-      const tiBottomForOverlap = tiBottom + ti.normH * DESCENDER_RATIO;
+      const tiIsCJK = hasCJK(ti.str);
+      const tiBottomForOverlap = tiBottom + ti.normH * (tiIsCJK ? DESCENDER_RATIO_CJK : DESCENDER_RATIO);
       const overlapLeft = Math.max(ti.normX, x1);
       const overlapRight = Math.min(tiRight, x2);
       const overlapWidth = overlapRight - overlapLeft;
@@ -419,7 +430,7 @@ export function snapBboxToText(
         const isMyText = checkOwnership(bbox, otherBboxes, ti, tiBottomForOverlap, textItems);
 
         if (isMyText) {
-          const visualTop = ti.normY + ti.normH * VISUAL_TOP_RATIO;
+          const visualTop = ti.normY + ti.normH * (tiIsCJK ? VISUAL_TOP_RATIO_CJK : VISUAL_TOP_RATIO);
           const visualBottom = tiBottom + ti.normH * VISUAL_BOTTOM_RATIO;
           if (visualTop < y1) {
             y1 = visualTop; changed = true;
@@ -448,7 +459,8 @@ export function snapBboxToText(
   for (const ti of textItems) {
     const tiRight = ti.normX + ti.normW;
     const tiBottom = ti.normY + ti.normH;
-    const tiBottomForOverlap = tiBottom + ti.normH * DESCENDER_RATIO;
+    const tiIsCJK = hasCJK(ti.str);
+    const tiBottomForOverlap = tiBottom + ti.normH * (tiIsCJK ? DESCENDER_RATIO_CJK : DESCENDER_RATIO);
 
     // 交集判定（和擴展邏輯一致）
     const overlapLeft = Math.max(ti.normX, x1);
@@ -467,7 +479,7 @@ export function snapBboxToText(
     // 歸屬判斷：只有屬於自己的 textItem 才納入退縮邊界計算
     if (!checkOwnership(bbox, otherBboxes, ti, tiBottomForOverlap, textItems)) continue;
 
-    const visualTop = ti.normY + ti.normH * VISUAL_TOP_RATIO;
+    const visualTop = ti.normY + ti.normH * (tiIsCJK ? VISUAL_TOP_RATIO_CJK : VISUAL_TOP_RATIO);
     const visualBottom = tiBottom + ti.normH * VISUAL_BOTTOM_RATIO;
 
     minVisualTop = Math.min(minVisualTop, visualTop);
@@ -822,18 +834,20 @@ export function applyDescenderCompensation(
 
     // 找出框底邊附近（baseline 在 y2 附近）的文字項，取最大高度
     let bottomEdgeH = 0;
+    let bottomEdgeHasCJK = false;
     for (const ti of textItems) {
       const tiRight = ti.normX + ti.normW;
       const tiBaseline = ti.normY + ti.normH;
       // 文字項需在框的 X 範圍內，且 baseline 接近 y2（差距 < 同行閾值）
       if (ti.normX < bx2 && tiRight > bx1 && Math.abs(tiBaseline - by2) < SAME_LINE_THRESHOLD) {
         bottomEdgeH = Math.max(bottomEdgeH, ti.normH);
+        if (hasCJK(ti.str)) bottomEdgeHasCJK = true;
       }
     }
 
     if (bottomEdgeH <= 0) continue;
 
-    const descenderAmount = bottomEdgeH * DESCENDER_RATIO;
+    const descenderAmount = bottomEdgeH * (bottomEdgeHasCJK ? DESCENDER_RATIO_CJK : DESCENDER_RATIO);
 
     // 找出 X 有重疊的下方最近框的 y1，降部不超過該邊界
     let nextY1 = NORMALIZED_MAX;

@@ -7,6 +7,7 @@
 
 'use client';
 
+import { useEffect, useRef } from 'react';
 import { FileEntry } from '@/lib/types';
 
 interface FileListPanelProps {
@@ -88,6 +89,32 @@ export default function FileListPanel({
   brokerSkipMap,
   skipLastPages,
 }: FileListPanelProps) {
+  const listRef = useRef<HTMLDivElement>(null);
+  const activeItemRef = useRef<HTMLLIElement>(null);
+
+  // 當 activeFileId 改變時：若項目在 80% 以下則移到 80%、在 15% 以上則移到 15%，其餘不滾動；使用平滑動畫
+  useEffect(() => {
+    const container = listRef.current;
+    const item = activeItemRef.current;
+    if (!container || !item) return;
+    const containerHeight = container.clientHeight;
+    const threshold10 = containerHeight * 0.15;
+    const threshold90 = containerHeight * 0.8;
+    const itemTopInView = item.getBoundingClientRect().top - container.getBoundingClientRect().top;
+    const itemTopInContent = container.scrollTop + itemTopInView;
+
+    let targetScrollTop = container.scrollTop;
+    if (itemTopInView > threshold90) {
+      targetScrollTop = itemTopInContent - threshold90;
+    } else if (itemTopInView < threshold10) {
+      targetScrollTop = itemTopInContent - threshold10;
+    }
+
+    if (targetScrollTop !== container.scrollTop) {
+      container.scrollTo({ top: Math.max(0, targetScrollTop), behavior: 'smooth' });
+    }
+  }, [activeFileId]);
+
   // 判斷 toggle 按鈕的三態
   const hasUnfinished = files.some((f) => f.status === 'idle' || f.status === 'stopped');
   const allDone = files.length > 0 && files.every((f) => f.status === 'done');
@@ -157,7 +184,7 @@ export default function FileListPanel({
       )}
 
       {/* 檔案列表 */}
-      <div className="flex-1 overflow-y-auto">
+      <div ref={listRef} className="flex-1 overflow-y-auto">
         {files.length === 0 ? (
           <div className="px-3 py-6 text-center text-xs text-gray-400">
             拖入 PDF 檔案
@@ -167,13 +194,13 @@ export default function FileListPanel({
             {files.map((entry, idx) => {
               const isActive = entry.id === activeFileId;
               return (
-                <li key={entry.id}>
+                <li key={entry.id} ref={isActive ? activeItemRef : undefined}>
                   <button
                     onClick={() => onSelectFile(entry.id)}
                     className={`group/item w-full text-left px-3 py-2 flex items-center gap-2 transition-colors cursor-pointer text-xs ${
                       isActive
-                        ? 'bg-blue-50 border-l-2 border-blue-500 text-blue-700'
-                        : 'hover:bg-gray-100 text-gray-700 border-l-2 border-transparent'
+                        ? 'bg-blue-100 border-l-[3px] border-blue-600 text-blue-800'
+                        : 'hover:bg-gray-100 text-gray-700 border-l-[3px] border-transparent'
                     }`}
                     title={entry.name}
                   >

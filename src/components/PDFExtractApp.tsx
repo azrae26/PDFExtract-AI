@@ -53,6 +53,10 @@ function saveConfig(patch: Record<string, unknown>) {
 /** 空 Set 常數（避免每次 render 建立新物件導致不必要的 re-render） */
 const EMPTY_SET = new Set<number>();
 
+/** DEVMODE 偵測：localhost 時設定變動自動上傳到伺服器（免密碼） */
+const IS_DEV_MODE = typeof window !== 'undefined' &&
+  (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
+
 // 設定 PDF.js worker（使用 CDN，避免 bundler 問題）
 if (typeof window !== 'undefined') {
   pdfjs.GlobalWorkerOptions.workerSrc = `//unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
@@ -95,6 +99,9 @@ export default function PDFExtractApp() {
     }
     return { ...DEFAULT_BROKER_SKIP_MAP };
   });
+
+  /** DEVMODE: 初始設定載入完成後才啟用自動上傳，避免載入設定時觸發上傳 */
+  const devAutoUploadReadyRef = useRef(false);
 
   const [currentPage, setCurrentPage] = useState(1);
   const [hoveredRegionId, setHoveredRegionId] = useState<string | null>(null);
@@ -163,7 +170,11 @@ export default function PDFExtractApp() {
         if (typeof d.leftWidth === 'number') setLeftWidth(d.leftWidth);
         if (typeof d.rightWidth === 'number') setRightWidth(d.rightWidth);
       })
-      .catch(() => { /* 網路錯誤靜默失敗，繼續使用本地設定 */ });
+      .catch(() => { /* 網路錯誤靜默失敗，繼續使用本地設定 */ })
+      .finally(() => {
+        // 延遲啟用 DEVMODE 自動上傳，確保初始設定的 state 更新已套用完畢
+        setTimeout(() => { devAutoUploadReadyRef.current = true; }, 1000);
+      });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -205,6 +216,34 @@ export default function PDFExtractApp() {
     } catch {
       alert('上傳失敗：無法連線到伺服器');
     }
+  }, [prompt, tablePrompt, model, batchSize, skipLastPages, brokerSkipMap, fileListWidth, leftWidth, rightWidth]);
+
+  // === DEVMODE: 任何設定改動後 5 秒自動上傳到伺服器（免密碼） ===
+  useEffect(() => {
+    if (!IS_DEV_MODE || !devAutoUploadReadyRef.current) return;
+
+    const timer = setTimeout(async () => {
+      const settings = {
+        prompt, tablePrompt, model, batchSize, skipLastPages, brokerSkipMap,
+        fileListWidth, leftWidth, rightWidth,
+      };
+      try {
+        const res = await fetch('/api/settings', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ settings }),
+        });
+        const json = await res.json();
+        const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
+        if (json.success) {
+          console.log(`[PDFExtractApp][${ts}] ✅ DEVMODE auto-saved settings to server`);
+        } else {
+          console.warn(`[PDFExtractApp][${ts}] ⚠️ DEVMODE auto-save failed: ${json.error}`);
+        }
+      } catch { /* 靜默失敗 */ }
+    }, 5000);
+
+    return () => clearTimeout(timer);
   }, [prompt, tablePrompt, model, batchSize, skipLastPages, brokerSkipMap, fileListWidth, leftWidth, rightWidth]);
 
   // === 切換活躍檔案 ===
