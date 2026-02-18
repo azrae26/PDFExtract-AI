@@ -6,6 +6,28 @@
  *       - pdf/debug-pdf.ts（離線 debug 工具）
  *       直接 import，確保演算法只有一份
  * 依賴：無
+ * 演算法邏輯順序（主 pipeline）：
+ * Phase 1   ：snapBboxToText             — 自動校正 bbox 邊界 + 歸屬判斷（退一半覆蓋量→行距 override）
+ *               ├─ checkOwnership        — 退一半覆蓋量 + 行距 override（內部函式）
+ *               └─ lineSpacingOwnership  — 行距歸屬判斷（內部函式）
+ * Phase 2   ：(resolveOverlappingLines 已移除，功能已整合進 Phase 1)
+ * Phase 2.25：resolveXOverlaps           — 解決 snap 後的 X 方向重疊
+ * Phase 2.5 ：enforceMinVerticalGap      — 保證框間最小垂直間距
+ * Phase 2.75：applyDescenderCompensation — 補償降部
+ * Phase 3   ：extractTextFromBbox        — 提取文字
+ *               ├─ splitIntoColumns      — 多欄偵測（內部呼叫）
+ *               │    ├─ Step 1: 按 baseline 分行
+ *               │    ├─ Step 2: 收集候選分界線（行內 gap 定位 + 投影法低覆蓋帶）
+ *               │    ├─ Step 3: testSeparator — baseline 對齊法驗證候選
+ *               │    └─ Step 4: 判定多欄（exclusiveRatio / 投影法嚴格 fallback）
+ *               └─ formatColumnText      — 排序拼接（內部呼叫）
+ *                    ├─ Step 1: 按 baseline 排序
+ *                    ├─ Step 2: 自適應行分組閾值（微聚類）
+ *                    ├─ Step 3: 按自適應閾值聚類分行 + Y 重疊行分組
+ *                    ├─ Step 3.5: 行碎片重組（超連結 baseline 偏移修復）
+ *                    ├─ Step 4: 計算行距（局部自適應段落間距偵測）
+ *                    └─ Step 5: 逐行拼接文字（行間換行/空行 + 行內 TAB/空格/回彈）
+ * 注意：resolveOverlappingLines / groupIntoLines 函式仍保留，供 debug-pdf.ts 使用
  */
 
 // ============================================================
@@ -69,7 +91,7 @@ export const SNAP_OVERLAP_RATIO = 0.5;
 export const SAME_LINE_THRESHOLD = 15;
 /** 框間最小垂直間距（歸一化單位），擴張後上下太近時各自退縮 */
 export const MIN_VERTICAL_GAP = 5;
-/** 降部補償比例：PDF 文字項 height 通常為 em height，降部約佔 25%（依字型而異） */
+/** 降部補償比例：PDF 文字項 height 通常為 em height，降部約佔 20%（依字型而異） */
 export const DESCENDER_RATIO = 0.20;
 /** 上方視覺留白比例：em square 頂部到文字視覺上緣的估計距離（佔 normH 的比例）
  *  snap 擴展 y1 時用 normY + normH × 此值 取代 normY，減少上方留白 */

@@ -1,16 +1,16 @@
 # PDFExtract AI — PDF 智能文本提取
 
-上傳 PDF 檔案，透過 Gemini AI 自動辨識頁面中的分析文本區域，在 PDF 上畫出可拖動、可調整大小的 bounding boxes，並將提取的文字整理顯示。
+上傳 PDF 檔案，透過 AI 自動辨識頁面中的分析文本區域，在 PDF 上畫出可拖動、可調整大小的 bounding boxes，並將提取的文字整理顯示。
 
 ## 功能特色
 
-- **拖拉上傳**：將 PDF 拖入右側上傳區，自動開始分析
-- **PDF 預覽**：中間面板即時顯示 PDF，支援多頁翻頁
-- **AI 標註**：透過 Gemini 2.0 Flash API 辨識分析文本區域，回傳座標與文字
+- **拖拉上傳**：將 PDF 拖入頁面任意區域，自動開始分析
+- **PDF 預覽**：中間面板即時顯示 PDF，支援連續頁面滾動
+- **AI 標註**：透過 AI 辨識分析文本區域，回傳座標與文字
 - **可互動框**：bounding boxes 可拖動移動、拖角/拖邊改大小
-- **文字提取**：左側面板按頁碼+順序整理所有提取文字，支援一鍵複製
-- **Hover 互動**：左側文字與中間框互相連動高亮
-- **自訂 Prompt**：右側可編輯 Prompt，修改後按「重新分析」即可重跑
+- **文字提取**：右側面板按頁碼+順序整理所有提取文字，支援一鍵複製
+- **Hover 互動**：右側文字與中間框互相連動高亮
+- **自訂 Prompt**：左側可編輯 Prompt，修改後按「重新分析」即可重跑
 - **狀態持久化**：檔案列表和分析結果自動存入 IndexedDB，重新整理後完整恢復
 - **設定同步**：一鍵上傳設定到伺服器，其他人開啟時自動套用共享設定
 
@@ -34,6 +34,7 @@ src/
     layout.tsx                — 根佈局
     globals.css               — 全域樣式
     api/analyze/route.ts      — Gemini API 端點（Server Side）
+    api/recognize/route.ts    — 裁切圖片 AI 識別端點（回傳 Markdown 文字）
     api/settings/route.ts     — 設定同步 API（GET 讀取 / POST 寫入共享設定）
   components/
     PDFExtractApp.tsx         — 主應用元件（全域狀態管理、四欄佈局、全域分析 toggle）
@@ -51,7 +52,9 @@ src/
   lib/
     types.ts                  — TypeScript 型別定義
     constants.ts              — 預設 Prompt、顏色配置等常數
+    brokerUtils.ts            — 券商名稱解析（從檔名/AI回傳辨識券商、忽略頁數映射）
     pdfTextExtractCore.ts     — PDF 文字提取純演算法核心（零依賴，前端+debug共用）
+    pdfTextExtract.ts         — PDF 文字層提取 IO 層（pdfjs 座標轉換 + 呼叫 core 演算法）
     persistence.ts            — IndexedDB 狀態持久化（PDF binary + 分析結果）
 ```
 
@@ -83,12 +86,12 @@ npm run dev
 
 ## 使用流程
 
-1. （可選）在右側修改 Prompt
-2. 將 PDF 檔案拖入右側上傳區
+1. （可選）在左側修改 Prompt
+2. 將 PDF 檔案拖入頁面任意區域
 3. 系統自動：顯示 PDF → 逐頁轉圖片 → 送 Gemini API 分析
-4. 分析完成後，中間 PDF 上出現彩色標註框，左側顯示提取文字
+4. 分析完成後，中間 PDF 上出現彩色標註框，右側顯示提取文字
 5. 可拖動/調整框的大小
-6. Hover 左側文字可高亮中間對應的框，反之亦然
+6. Hover 右側文字可高亮中間對應的框，反之亦然
 7. 點擊「複製全部」可複製所有提取文字
 
 ## 座標系統
@@ -111,7 +114,7 @@ npx tsx debug-pdf.ts items <file> [page]
 # 顯示行分組結果（自適應閾值 + Y重疊合併 + 碎片重組）
 npx tsx debug-pdf.ts lines <file> [page]
 
-# 模擬完整提取流程：snap → resolve → enforce → descender → 多欄偵測 → 文字
+# 模擬完整提取流程：snap → resolveXOverlaps → enforce → descender → 多欄偵測 → 文字
 npx tsx debug-pdf.ts extract <file> <page> <x1,y1,x2,y2> [x1,y1,x2,y2 ...]
 
 # 批次掃描目錄下所有 PDF

@@ -572,6 +572,8 @@ export default function PDFExtractApp() {
           onClearAll={handleClearAll}
           isAnalyzing={isAnalyzing}
           onToggleAnalysis={handleToggleAnalysis}
+          brokerSkipMap={brokerSkipMap}
+          skipLastPages={skipLastPages}
         />
       </div>
 
@@ -594,7 +596,7 @@ export default function PDFExtractApp() {
           apiKey={apiKey}
           onApiKeyChange={setApiKey}
           isAnalyzing={activeFile?.status === 'processing'}
-          progress={{ current: activeFile?.completedPages ?? 0, total: activeFile?.analysisPages ?? 0 }}
+          progress={{ current: activeFile?.pageRegions?.size ?? 0, total: Math.max(1, numPages - ((activeFile?.report && brokerSkipMap[activeFile.report] !== undefined) ? brokerSkipMap[activeFile.report] : skipLastPages)) }}
           numPages={numPages}
           onReanalyze={() => {
             if (!activeFileId || !activeFile || !apiKey) return;

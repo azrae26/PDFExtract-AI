@@ -19,6 +19,18 @@ interface FileListPanelProps {
   isAnalyzing: boolean;
   /** 全域分析 toggle：暫停 / 繼續 / 全部重新分析 */
   onToggleAnalysis: () => void;
+  /** 券商 → 忽略末尾頁數映射 */
+  brokerSkipMap: Record<string, number>;
+  /** 全域忽略末尾頁數 */
+  skipLastPages: number;
+}
+
+/** 計算單檔實際要分析的頁數（numPages - effectiveSkip） */
+function getPagesToAnalyze(entry: FileEntry, brokerSkipMap: Record<string, number>, skipLastPages: number): number {
+  const effectiveSkip = (entry.report && brokerSkipMap[entry.report] !== undefined)
+    ? brokerSkipMap[entry.report]
+    : skipLastPages;
+  return Math.max(1, entry.numPages - effectiveSkip);
 }
 
 /** 狀態圖示 */
@@ -73,14 +85,16 @@ export default function FileListPanel({
   onClearAll,
   isAnalyzing,
   onToggleAnalysis,
+  brokerSkipMap,
+  skipLastPages,
 }: FileListPanelProps) {
   // 判斷 toggle 按鈕的三態
   const hasUnfinished = files.some((f) => f.status === 'idle' || f.status === 'stopped');
   const allDone = files.length > 0 && files.every((f) => f.status === 'done');
 
-  // 全域合計統計
-  const totalCompleted = files.reduce((sum, f) => sum + f.completedPages, 0);
-  const totalAnalysis = files.reduce((sum, f) => sum + f.analysisPages, 0);
+  // 全域合計統計（僅頁面進度，不包含 region 識別任務；分母扣除忽略頁數）
+  const totalCompleted = files.reduce((sum, f) => sum + (f.pageRegions?.size ?? 0), 0);
+  const totalToAnalyze = files.reduce((sum, f) => sum + getPagesToAnalyze(f, brokerSkipMap, skipLastPages), 0);
   const totalPages = files.reduce((sum, f) => sum + f.numPages, 0);
 
   let toggleLabel: string;
@@ -123,7 +137,7 @@ export default function FileListPanel({
           <div className="flex gap-1 text-center">
             <div className="rounded-md bg-green-50 py-1.5 px-2 flex-1">
               <div className="text-lg font-extrabold text-green-600">
-                {totalCompleted}<span className="mx-0.5">/</span>{totalAnalysis}
+                {totalCompleted}<span className="mx-0.5">/</span>{totalToAnalyze}
               </div>
               <div className="text-[9px] text-green-600">已完成</div>
             </div>
@@ -168,7 +182,7 @@ export default function FileListPanel({
                       <p className="font-medium leading-tight line-clamp-2 break-all">{entry.name}</p>
                       <p className="text-[10px] text-gray-400 mt-0.5">
                         {entry.numPages > 0
-                          ? `${entry.completedPages}/${entry.analysisPages}/${entry.numPages} 頁`
+                          ? `${entry.pageRegions?.size ?? 0}/${getPagesToAnalyze(entry, brokerSkipMap, skipLastPages)} 頁`
                           : entry.status === 'processing' ? '分析中...'
                           : entry.status === 'queued' ? '等待中'
                           : entry.status === 'stopped' ? '已中斷'

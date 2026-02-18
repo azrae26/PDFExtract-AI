@@ -193,7 +193,7 @@ export default function PdfUploader({
                 {fileName || ''}
               </span>
             </div>
-            {/* 進度統計：已完成(completedPages/analysisPages) / 總頁數 / 券商名（始終顯示） */}
+            {/* 進度統計：已完成頁數/總頁數 / 券商名（始終顯示） */}
             <div className="flex gap-1 text-center">
               <div className="rounded-md bg-green-50 py-1.5 px-2" style={{ flex: '1 1 auto' }}>
                 <div className="text-lg font-extrabold text-green-600">
@@ -472,8 +472,10 @@ export default function PdfUploader({
           <div className="flex gap-1.5">
             <input
               type="password"
-              autoComplete="off"
+              autoComplete="one-time-code"
               data-form-type="other"
+              data-1p-ignore
+              data-lpignore="true"
               value={apiKeyInput}
               onChange={(e) => setApiKeyInput(e.target.value)}
               onKeyDown={(e) => {
