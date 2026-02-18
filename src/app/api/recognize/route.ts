@@ -2,6 +2,7 @@
  * 功能：Gemini API 圖片識別端點（表格/圖表/文字）
  * 職責：接收裁切後的圖片 + Prompt，呼叫 Gemini API 回傳純文字（Markdown）
  * 依賴：@google/generative-ai、前端傳入的 apiKey（優先）或環境變數 GEMINI_API_KEY（fallback）
+ * 推理：盡量設最低 — Flash 用 thinkingBudget: 0；Pro 系列強制 thinking mode，用最小值 128
  */
 
 import { GoogleGenerativeAI } from '@google/generative-ai';
@@ -11,6 +12,21 @@ import { NextRequest, NextResponse } from 'next/server';
 const MODEL_FALLBACK: Record<string, string> = {
   'gemini-3-pro-preview': 'gemini-3-flash-preview',
 };
+
+/** 強制 thinking mode 的模型（無法設 thinkingBudget: 0）— 2.5 Pro 最低 128，3 Pro 僅支援 thinking */
+const MODELS_REQUIRE_THINKING = new Set([
+  'gemini-3-pro-preview',
+  'gemini-2.5-pro',
+  'gemini-2.5-pro-preview',
+]);
+
+type GenConfig = Parameters<InstanceType<typeof GoogleGenerativeAI>['getGenerativeModel']>[0]['generationConfig'];
+
+/** 依模型回傳最低推理程度：Pro 系列用 128，其餘用 0（關閉） */
+function getThinkingConfigMinimal(modelId: string): NonNullable<GenConfig> {
+  const budget = MODELS_REQUIRE_THINKING.has(modelId) ? 128 : 0;
+  return { thinkingConfig: { thinkingBudget: budget } } as GenConfig;
+}
 
 interface RecognizeResponse {
   success: boolean;
@@ -61,7 +77,10 @@ export async function POST(request: NextRequest): Promise<NextResponse<Recognize
     let result;
 
     try {
-      const modelObj = genAI.getGenerativeModel({ model: selectedModel });
+      const modelObj = genAI.getGenerativeModel({
+        model: selectedModel,
+        generationConfig: getThinkingConfigMinimal(selectedModel),
+      });
       result = await modelObj.generateContent(contentParts);
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
@@ -70,7 +89,10 @@ export async function POST(request: NextRequest): Promise<NextResponse<Recognize
         const ts2 = new Date().toLocaleTimeString('en-US', { hour12: false });
         console.log(`[RecognizeRoute][${ts2}] ⚠️ ${selectedModel} quota exceeded, falling back to ${fallback}...`);
         actualModel = fallback;
-        const fallbackObj = genAI.getGenerativeModel({ model: fallback });
+        const fallbackObj = genAI.getGenerativeModel({
+          model: fallback,
+          generationConfig: getThinkingConfigMinimal(fallback),
+        });
         result = await fallbackObj.generateContent(contentParts);
       } else {
         throw err;

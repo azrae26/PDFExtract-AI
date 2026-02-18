@@ -197,7 +197,7 @@ export default function FileListPanel({
                 <li key={entry.id} ref={isActive ? activeItemRef : undefined}>
                   <button
                     onClick={() => onSelectFile(entry.id)}
-                    className={`group/item w-full text-left px-3 py-2 flex items-center gap-2 transition-colors cursor-pointer text-xs ${
+                    className={`group/item w-full text-left pl-2 pr-1.5 py-2 flex items-center gap-1 transition-colors cursor-pointer text-xs ${
                       isActive
                         ? 'bg-blue-100 border-l-[3px] border-blue-600 text-blue-800'
                         : 'hover:bg-gray-100 text-gray-700 border-l-[3px] border-transparent'
@@ -232,7 +232,7 @@ export default function FileListPanel({
                           onRemoveFile(entry.id);
                         }
                       }}
-                      className="flex-shrink-0 w-4 h-4 flex items-center justify-center rounded hover:bg-red-100 text-gray-300 hover:text-red-500 transition-colors cursor-pointer opacity-0 group-hover/item:opacity-100"
+                      className="flex-shrink-0 w-4 h-4 -ml-0.5 flex items-center justify-center rounded hover:bg-red-100 text-gray-300 hover:text-red-500 transition-colors cursor-pointer opacity-0 group-hover/item:opacity-100"
                       title="移除檔案"
                     >
                       <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
