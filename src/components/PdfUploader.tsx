@@ -180,16 +180,16 @@ export default function PdfUploader({
         {/* 狀態區（最上方）：有檔案時顯示檔名，分析中額外顯示進度統計 */}
         {hasFile && (
           <div className="space-y-2">
-            {/* 檔名 */}
-            <div className="flex items-center gap-2">
+            {/* 檔名（多行換行，長檔名完整顯示） */}
+            <div className="flex items-start gap-2">
               {isAnalyzing ? (
-                <div className="animate-spin w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full flex-shrink-0" />
+                <div className="animate-spin w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full flex-shrink-0 mt-0.5" />
               ) : (
-                <svg className="w-4 h-4 text-gray-400 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                <svg className="w-4 h-4 text-gray-400 flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
                   <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
                 </svg>
               )}
-              <span className={`text-[14px] font-bold truncate min-w-0 ${isAnalyzing ? 'text-blue-600' : 'text-gray-700'}`}>
+              <span className={`text-[14px] font-bold break-words min-w-0 flex-1 ${isAnalyzing ? 'text-blue-600' : 'text-gray-700'}`}>
                 {fileName || ''}
               </span>
             </div>

@@ -387,7 +387,12 @@ export default function PdfViewer({
         return;
       }
 
-      // Space / S / W：捲動一頁（不需焦點）
+      // Space / S / W：捲動一頁（不需焦點）；輸入狀態時不監聽
+      const el = e.target as HTMLElement;
+      const tag = el?.tagName?.toUpperCase();
+      const isInput = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || (el?.isContentEditable ?? false);
+      if (isInput) return;
+
       let delta = 0;
       if (e.key === ' ') {
         delta = e.shiftKey ? -1 : 1;
