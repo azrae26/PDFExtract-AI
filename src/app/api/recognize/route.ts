@@ -25,7 +25,7 @@ type GenConfig = Parameters<InstanceType<typeof GoogleGenerativeAI>['getGenerati
 /** 依模型回傳最低推理程度：Pro 系列用 128，其餘用 0（關閉） */
 function getThinkingConfigMinimal(modelId: string): NonNullable<GenConfig> {
   const budget = MODELS_REQUIRE_THINKING.has(modelId) ? 128 : 0;
-  return { thinkingConfig: { thinkingBudget: budget } } as GenConfig;
+  return { thinkingConfig: { thinkingBudget: budget } } as NonNullable<GenConfig>;
 }
 
 interface RecognizeResponse {
