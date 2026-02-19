@@ -1,7 +1,7 @@
 /**
  * 功能：多檔案生命週期管理 Custom Hook
  * 職責：管理 files[] 狀態（唯一資料來源）、PDF 預載快取、分析佇列協調、檔案上傳（三模式：背景跑/當前頁並跑/僅加入列表）/刪除/清空、
- *       整合 useAnalysis hook、PDF Document 載入回呼、分析完成收尾、mountedFileIds 衍生計算、
+ *       整合 useAnalysis hook、PDF Document 載入回呼、分析完成收尾、mountedFileIds 衍生計算、券商映射正規化、
  *       per-file 停止（handleStopFile）、重新分析排隊制（handleReanalyzeFile + priorityFileIdRef）
  * 依賴：react、react-pdf (pdfjs)、useAnalysis hook、brokerUtils、persistence (IndexedDB)
  *
@@ -15,9 +15,9 @@
 
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import { pdfjs } from 'react-pdf';
-import { Region, FileEntry } from '@/lib/types';
+import { Region, FileEntry, MetadataCandidate } from '@/lib/types';
 import { FileProgressUpdater } from '@/hooks/analysisHelpers';
-import { parseBrokerFromFilename } from '@/lib/brokerUtils';
+import { buildBrokerAliasMap, normalizeBrokerByAlias, parseMetadataFromFilename } from '@/lib/brokerUtils';
 import useAnalysis from '@/hooks/useAnalysis';
 import { saveSession, loadSession, savePdfBlob, deletePdfBlob, clearAll as clearAllPersistence } from '@/lib/persistence';
 
@@ -34,6 +34,53 @@ function generateFileId(): string {
   return `file-${Date.now()}-${++_fileIdCounter}`;
 }
 
+type MetadataField = 'date' | 'code' | 'broker';
+
+function normalizeMetaValue(value: string): string {
+  return value.trim();
+}
+
+function appendMetaCandidate(
+  prev: MetadataCandidate[] | undefined,
+  rawValue: string | undefined,
+  source: MetadataCandidate['source'],
+): MetadataCandidate[] {
+  const value = normalizeMetaValue(rawValue || '');
+  const base = prev ?? [];
+  if (!value) return base;
+  const existed = base.some((c) => normalizeMetaValue(c.value).toLowerCase() === value.toLowerCase());
+  if (existed) return base;
+  return [...base, { value, source }];
+}
+
+function removeMetaCandidate(
+  prev: MetadataCandidate[] | undefined,
+  rawValue: string,
+): MetadataCandidate[] {
+  const value = normalizeMetaValue(rawValue).toLowerCase();
+  return (prev ?? []).filter((c) => normalizeMetaValue(c.value).toLowerCase() !== value);
+}
+
+function getFieldKeys(field: MetadataField): {
+  candidates: 'dateCandidates' | 'codeCandidates' | 'brokerCandidates';
+  selected: 'selectedDate' | 'selectedCode' | 'selectedBroker';
+} {
+  if (field === 'date') return { candidates: 'dateCandidates', selected: 'selectedDate' };
+  if (field === 'code') return { candidates: 'codeCandidates', selected: 'selectedCode' };
+  return { candidates: 'brokerCandidates', selected: 'selectedBroker' };
+}
+
+/** 查找券商忽略末尾頁數：優先用原始名稱（如「凱基(一般報告)」），找不到才用已映射名稱 */
+function lookupBrokerSkip(
+  entry: FileEntry | null | undefined,
+  skipMap: Record<string, number>,
+): number | undefined {
+  if (!entry) return undefined;
+  if (entry.report && skipMap[entry.report] !== undefined) return skipMap[entry.report];
+  if (entry.selectedBroker && skipMap[entry.selectedBroker] !== undefined) return skipMap[entry.selectedBroker];
+  return undefined;
+}
+
 // === Hook 輸入介面 ===
 interface UseFileManagerOptions {
   prompt: string;
@@ -42,6 +89,7 @@ interface UseFileManagerOptions {
   batchSize: number;
   skipLastPages: number;
   brokerSkipMap: Record<string, number>;
+  brokerAliasGroups: string[];
   /** Gemini API 金鑰（前端使用者輸入） */
   apiKey: string;
 }
@@ -88,6 +136,14 @@ export interface FileManagerResult {
   handleReanalyzeFile: (numPages: number, targetFileId: string, fileUrl: string) => void;
   /** 觸發佇列處理（將 queued 檔案開始分析） */
   triggerQueueProcessing: () => void;
+  /** 設定指定欄位為已確認值（不刪除其他候選值） */
+  selectFileMetadata: (fileId: string, field: MetadataField, value: string) => void;
+  /** 新增指定欄位候選值（手動輸入） */
+  addFileMetadataCandidate: (fileId: string, field: MetadataField, value: string) => void;
+  /** 刪除指定欄位候選值 */
+  removeFileMetadataCandidate: (fileId: string, field: MetadataField, value: string) => void;
+  /** 清空指定欄位所有候選值 */
+  clearFileMetadataCandidates: (fileId: string, field: MetadataField) => void;
 
   // Derived
   mountedFileIds: Set<string>;
@@ -100,6 +156,7 @@ export default function useFileManager({
   batchSize,
   skipLastPages,
   brokerSkipMap,
+  brokerAliasGroups,
   apiKey,
 }: UseFileManagerOptions): FileManagerResult {
   // === 多檔案狀態 ===
@@ -141,7 +198,16 @@ export default function useFileManager({
 
   // === 券商相關 refs ===
   const brokerSkipMapRef = useRef(brokerSkipMap);
+  const brokerAliasMapRef = useRef<Record<string, string>>(buildBrokerAliasMap(brokerAliasGroups));
   const skipLastPagesRef = useRef(skipLastPages);
+  useEffect(() => {
+    brokerAliasMapRef.current = buildBrokerAliasMap(brokerAliasGroups);
+  }, [brokerAliasGroups]);
+
+  const normalizeBrokerName = useCallback((raw: string | undefined): string => {
+    return normalizeBrokerByAlias(raw, brokerAliasMapRef.current)?.trim() || '';
+  }, []);
+
   // cancelQueuedPage 來自 useAnalysis（在 updateFileReport 之後才可用），用 ref 橋接
   const cancelQueuedPageRef = useRef<(fid: string, p: number) => void>(() => {});
   // 防止同一檔案重複恢復被省略頁面（多頁回傳同一券商名時只執行一次）
@@ -153,13 +219,21 @@ export default function useFileManager({
    */
   const updateFileReport = useCallback(
     (targetFileId: string, report: string) => {
+      const rawReport = report.trim();
+      const canonicalReport = normalizeBrokerName(rawReport);
+      if (!canonicalReport) return;
       setFiles((prev) =>
-        prev.map((f) => (f.id === targetFileId ? { ...f, report } : f))
+        prev.map((f) => (
+          f.id === targetFileId
+            ? { ...f, report: rawReport, selectedBroker: f.selectedBroker || canonicalReport }
+            : f
+        ))
       );
 
       // 若券商有特定忽略末尾頁數，比較與分析啟動時實際使用的 skip 值
       // 注意：不修改全域 skipLastPages（那是使用者手動設的預設值，僅在無法辨識券商時使用）
-      const brokerSkip = brokerSkipMapRef.current[report];
+      // 優先用原始名稱查找（如「凱基(一般報告)」），找不到才用映射名稱（如「凱基」）
+      const brokerSkip = brokerSkipMapRef.current[rawReport] ?? brokerSkipMapRef.current[canonicalReport];
       if (brokerSkip !== undefined) {
         const file = filesRef.current.find((f) => f.id === targetFileId);
         if (file && file.numPages > 0) {
@@ -205,8 +279,126 @@ export default function useFileManager({
         }
       }
     },
-    []
+    [normalizeBrokerName]
   );
+
+  /** 追加指定檔案的 metadata 候選值（date/code/broker） */
+  const updateFileMetadata = useCallback(
+    (
+      targetFileId: string,
+      patch: { date?: string; code?: string; broker?: string; source: MetadataCandidate['source'] },
+    ) => {
+      setFiles((prev) =>
+        prev.map((f) => {
+          if (f.id !== targetFileId) return f;
+
+          const nextDateCandidates = patch.date
+            ? appendMetaCandidate(f.dateCandidates, patch.date, patch.source)
+            : f.dateCandidates;
+          const nextCodeCandidates = patch.code
+            ? appendMetaCandidate(f.codeCandidates, patch.code, patch.source)
+            : f.codeCandidates;
+          const nextBrokerCandidates = patch.broker
+            ? appendMetaCandidate(f.brokerCandidates, normalizeBrokerName(patch.broker), patch.source)
+            : f.brokerCandidates;
+
+          return {
+            ...f,
+            dateCandidates: nextDateCandidates,
+            codeCandidates: nextCodeCandidates,
+            brokerCandidates: nextBrokerCandidates,
+            selectedDate: f.selectedDate || normalizeMetaValue(patch.date || ''),
+            selectedCode: f.selectedCode || normalizeMetaValue(patch.code || ''),
+            selectedBroker: f.selectedBroker || normalizeBrokerName(patch.broker),
+            report: patch.broker ? (patch.broker.trim() || f.report) : f.report,
+          };
+        })
+      );
+    },
+    [normalizeBrokerName]
+  );
+
+  /** 設定指定欄位為已確認值（僅切換選中狀態，不刪除其他候選值） */
+  const selectFileMetadata = useCallback((fileId: string, field: MetadataField, value: string) => {
+    const normalized = normalizeMetaValue(value);
+    if (!normalized) return;
+    const keys = getFieldKeys(field);
+    setFiles((prev) =>
+      prev.map((f) => {
+        if (f.id !== fileId) return f;
+        return {
+          ...f,
+          [keys.selected]: field === 'broker' ? normalizeBrokerName(normalized) : normalized,
+          ...(field === 'broker' ? { report: normalizeBrokerName(normalized) } : {}),
+        };
+      })
+    );
+  }, [normalizeBrokerName]);
+
+  /** 新增指定欄位候選值（手動輸入） */
+  const addFileMetadataCandidate = useCallback((fileId: string, field: MetadataField, value: string) => {
+    const normalized = normalizeMetaValue(value);
+    if (!normalized) return;
+    const keys = getFieldKeys(field);
+    setFiles((prev) =>
+      prev.map((f) => {
+        if (f.id !== fileId) return f;
+        const nextCandidates = appendMetaCandidate(
+          (f as FileEntry)[keys.candidates] as MetadataCandidate[] | undefined,
+          field === 'broker' ? normalizeBrokerName(normalized) : normalized,
+          'manual',
+        );
+        const nextValue = field === 'broker' ? normalizeBrokerName(normalized) : normalized;
+        return {
+          ...f,
+          [keys.candidates]: nextCandidates,
+          [keys.selected]: nextValue,
+          ...(field === 'broker' ? { report: nextValue } : {}),
+        };
+      })
+    );
+  }, [normalizeBrokerName]);
+
+  /** 刪除指定欄位候選值 */
+  const removeFileMetadataCandidate = useCallback((fileId: string, field: MetadataField, value: string) => {
+    const keys = getFieldKeys(field);
+    setFiles((prev) =>
+      prev.map((f) => {
+        if (f.id !== fileId) return f;
+        const nextCandidates = removeMetaCandidate(
+          (f as FileEntry)[keys.candidates] as MetadataCandidate[] | undefined,
+          value,
+        );
+        const currentSelected = (f as FileEntry)[keys.selected] as string | undefined;
+        const removedSelected = currentSelected
+          && normalizeMetaValue(currentSelected).toLowerCase() === normalizeMetaValue(value).toLowerCase();
+        const fallbackSelected = nextCandidates[0]?.value || '';
+        const nextSelected = removedSelected ? fallbackSelected : (currentSelected || fallbackSelected);
+        return {
+          ...f,
+          [keys.candidates]: nextCandidates,
+          [keys.selected]: nextSelected,
+          ...(field === 'broker' ? { report: nextSelected || f.report } : {}),
+        };
+      })
+    );
+  }, []);
+
+  /** 清空指定欄位所有候選值 */
+  const clearFileMetadataCandidates = useCallback((fileId: string, field: MetadataField) => {
+    const keys = getFieldKeys(field);
+    setFiles((prev) =>
+      prev.map((f) => {
+        if (f.id !== fileId) return f;
+        return {
+          ...f,
+          [keys.candidates]: [],
+          [keys.selected]: '',
+          ...(field === 'broker' ? { report: '' } : {}),
+        };
+      })
+    );
+  }, []);
 
   /** 更新指定檔案的 per-file 分析進度（analysisPages / completedPages） */
   const updateFileProgress: FileProgressUpdater = useCallback(
@@ -271,6 +463,7 @@ export default function useFileManager({
     pdfDocRef,
     updateFileRegions,
     updateFileReport,
+    updateFileMetadata,
     updateFileProgress,
     prompt,
     tablePrompt,
@@ -351,9 +544,7 @@ export default function useFileManager({
     }
 
     // 若檔案已有券商名且在 brokerSkipMap 中有設定，優先使用券商特定值
-    const effectiveSkip = (nextQueued.report && brokerSkipMapRef.current[nextQueued.report] !== undefined)
-      ? brokerSkipMapRef.current[nextQueued.report]
-      : skipLastPages;
+    const effectiveSkip = lookupBrokerSkip(nextQueued, brokerSkipMapRef.current) ?? skipLastPages;
     const pagesToAnalyze = Math.max(1, pages - effectiveSkip);
 
     // 收集已完成的頁面（pageRegions 中有 entry 的頁碼，包含空陣列＝AI 判斷無區域）
@@ -644,9 +835,7 @@ export default function useFileManager({
     if (cachedDoc) {
       const pages = nextQueued.numPages || cachedDoc.numPages;
       // 若檔案已有券商名且在 brokerSkipMap 中有設定，優先使用券商特定值
-      const effectiveSkip2 = (nextQueued.report && brokerSkipMapRef.current[nextQueued.report] !== undefined)
-        ? brokerSkipMapRef.current[nextQueued.report]
-        : skipLastPages;
+      const effectiveSkip2 = lookupBrokerSkip(nextQueued, brokerSkipMapRef.current) ?? skipLastPages;
       const pagesToAnalyze = Math.max(1, pages - effectiveSkip2);
       const completedPages = buildCompletedPages(nextQueued, pagesToAnalyze);
       const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
@@ -656,7 +845,7 @@ export default function useFileManager({
       // PDF 不在快取中（檔案可能不在預載視窗內，PdfViewer 未掛載）→ 主動載入 PDF 後啟動分析
       const queuedFileId = nextQueued.id;
       const queuedFileUrl = nextQueued.url;
-      const queuedFileReport = nextQueued.report;
+      const queuedFileSkip = lookupBrokerSkip(nextQueued, brokerSkipMapRef.current);
       const queuedFileNumPages = nextQueued.numPages;
       const queuedFilePageRegions = nextQueued.pageRegions;
       pdfjs.getDocument(queuedFileUrl).promise.then((doc) => {
@@ -673,9 +862,7 @@ export default function useFileManager({
           );
         }
         // 計算有效忽略頁數 + 已完成頁面
-        const effectiveSkipAsync = (queuedFileReport && brokerSkipMapRef.current[queuedFileReport] !== undefined)
-          ? brokerSkipMapRef.current[queuedFileReport]
-          : skipLastPages;
+        const effectiveSkipAsync = queuedFileSkip ?? skipLastPages;
         const pagesToAnalyze = Math.max(1, pages - effectiveSkipAsync);
         const completedPagesAsync = new Set<number>();
         queuedFilePageRegions.forEach((_regions, pageNum) => {
@@ -720,10 +907,12 @@ export default function useFileManager({
 
       const knownBrokers = Object.keys(brokerSkipMapRef.current);
       const newEntries: FileEntry[] = pdfFiles.map((file) => {
-        const broker = parseBrokerFromFilename(file.name, knownBrokers);
-        if (broker) {
+        const parsed = parseMetadataFromFilename(file.name, knownBrokers, brokerAliasMapRef.current);
+        const rawBroker = parsed.broker || '';
+        const canonicalBroker = normalizeBrokerName(rawBroker) || '';
+        if (canonicalBroker) {
           const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
-          console.log(`[useFileManager][${ts}] 🏢 Broker "${broker}" detected from filename: ${file.name}`);
+          console.log(`[useFileManager][${ts}] 🏢 Broker "${canonicalBroker}" detected from filename: ${file.name}${rawBroker !== canonicalBroker ? ` (raw: "${rawBroker}")` : ''}`);
         }
         return {
           id: generateFileId(),
@@ -735,7 +924,13 @@ export default function useFileManager({
           pageRegions: new Map(),
           analysisPages: 0,
           completedPages: 0,
-          report: broker,
+          dateCandidates: parsed.date ? [{ value: parsed.date, source: 'filename' }] : [],
+          codeCandidates: parsed.code ? [{ value: parsed.code, source: 'filename' }] : [],
+          brokerCandidates: canonicalBroker ? [{ value: canonicalBroker, source: 'filename' }] : [],
+          selectedDate: parsed.date || '',
+          selectedCode: parsed.code || '',
+          selectedBroker: canonicalBroker,
+          report: rawBroker,
         };
       });
 
@@ -792,7 +987,7 @@ export default function useFileManager({
         setTimeout(() => processNextInQueue(), 0);
       }
     },
-    [processNextInQueue]
+    [normalizeBrokerName, processNextInQueue]
   );
 
   // === PDF Document 載入完成（per-file scoped，由 react-pdf 觸發）===
@@ -822,9 +1017,7 @@ export default function useFileManager({
       const currentFile = filesRef.current.find((f) => f.id === fileId);
       if (apiKey && currentFile?.status === 'processing' && analysisFileIdRef.current !== fileId) {
         // 若檔案已有券商名且在 brokerSkipMap 中有設定，優先使用券商特定值
-        const effectiveSkipDoc = (currentFile.report && brokerSkipMapRef.current[currentFile.report] !== undefined)
-          ? brokerSkipMapRef.current[currentFile.report]
-          : skipLastPages;
+        const effectiveSkipDoc = lookupBrokerSkip(currentFile, brokerSkipMapRef.current) ?? skipLastPages;
         const pagesToAnalyze = Math.max(1, pdf.numPages - effectiveSkipDoc);
         // 收集已完成的頁面（繼續分析時跳過）
         const completedPages = new Set<number>();
@@ -1016,6 +1209,7 @@ export default function useFileManager({
     analyzingPagesMap, queuedPagesMap, cancelQueuedPage,
     analysisFileIdRef,
     handleStopFile, handleReanalyzeFile, triggerQueueProcessing,
+    selectFileMetadata, addFileMetadataCandidate, removeFileMetadataCandidate, clearFileMetadataCandidates,
 
     // Derived
     mountedFileIds,

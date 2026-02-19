@@ -2,8 +2,8 @@
  * 功能：PDF 分析核心純函式工具模組
  * 職責：PDF 頁面渲染、API 呼叫（含失敗自動重試最多 2 次、前端傳入 apiKey）、分析結果合併（回傳空文字 region 清單）、
  *       頁面 canvas 渲染與區域裁切（renderPageCanvas + cropRegionFromCanvas，支援同頁多 region 複用同一 canvas）、
- *       區域截圖裁切、區域識別 API
- * 依賴：pdfjs、types、constants、pdfTextExtract
+ *       區域截圖裁切、區域識別 API、date/code/report metadata 候選值更新
+ * 依賴：pdfjs、types、constants、pdfTextExtract、brokerUtils、kaiuCmap（亂碼偵測）
  *
  * 重要設計：
  * - 所有函式皆為純函式（不依賴 React state），接受 isSessionValid callback 作為參數
@@ -15,6 +15,26 @@ import { pdfjs } from 'react-pdf';
 import { Region } from '@/lib/types';
 import { RENDER_SCALE, JPEG_QUALITY, NORMALIZED_MAX } from '@/lib/constants';
 import { extractTextForRegions } from '@/lib/pdfTextExtract';
+import { isCompleteDate, shouldIgnoreBroker } from '@/lib/brokerUtils';
+import { isCidPassthrough } from '@/lib/kaiuCmap';
+
+/** 判定文字是否為亂碼（CID passthrough、錯誤編碼等），應觸發 AI 識別
+ *  可讀字元：CJK、ASCII 可列印、常用標點。若可讀比例過低則視為亂碼 */
+function isGarbledText(str: string): boolean {
+  const t = str.trim();
+  if (!t || t.length < 4) return false;
+  if (isCidPassthrough(t)) return true;
+  let readable = 0;
+  for (let i = 0; i < t.length; i++) {
+    const cp = t.codePointAt(i)!;
+    if (cp >= 0x4e00 && cp <= 0x9fff) readable++;
+    else if (cp >= 0x20 && cp <= 0x7e) readable++;
+    else if (cp >= 0x3000 && cp <= 0x303f) readable++;
+    else if (cp >= 0xff00 && cp <= 0xffef) readable++;
+    else if (cp >= 0x2000 && cp <= 0x206f) readable++; // 通用標點
+  }
+  return readable / t.length < 0.35;
+}
 
 // === API 失敗重試設定 ===
 export const MAX_RETRIES = 2; // 最多重試 2 次（總共 3 次嘗試）
@@ -28,6 +48,12 @@ export type FileRegionsUpdater = (
 
 /** 檔案級 report 更新器：更新指定檔案的券商名 */
 export type FileReportUpdater = (targetFileId: string, report: string) => void;
+
+/** 檔案級 metadata 更新器：追加 date/code/broker 候選值（來源通常為 AI） */
+export type FileMetadataUpdater = (
+  targetFileId: string,
+  patch: { date?: string; code?: string; broker?: string; source: 'filename' | 'ai' | 'manual' },
+) => void;
 
 /** per-file 分析進度更新器：設定絕對值或增減量 */
 export type FileProgressUpdater = (
@@ -178,17 +204,29 @@ export async function analyzePageWithRetry(
 // 傳入 pdfDoc 快照 + sessionId + targetFileId
 export async function mergePageResult(
   pageNum: number,
-  result: { hasAnalysis: boolean; report?: string; regions: Region[] },
+  result: { hasAnalysis: boolean; date?: string; code?: string; report?: string; regions: Region[] },
   pdfDoc: pdfjs.PDFDocumentProxy,
   sessionId: number,
   isSessionValid: SessionValidator,
   targetFileId: string,
   updateFileRegions: FileRegionsUpdater,
   updateFileReport: FileReportUpdater,
+  updateFileMetadata?: FileMetadataUpdater,
 ): Promise<Region[]> {
-  // 儲存券商名（只要有 report 就更新，即使沒有 regions）
-  if (result.report) {
-    updateFileReport(targetFileId, result.report);
+  const useDate = result.date && isCompleteDate(result.date);
+  const useBroker = result.report && !shouldIgnoreBroker(result.report);
+  if (updateFileMetadata && (useDate || result.code || useBroker)) {
+    updateFileMetadata(targetFileId, {
+      date: useDate ? result.date : undefined,
+      code: result.code,
+      broker: useBroker ? result.report : undefined,
+      source: 'ai',
+    });
+  }
+
+  // 儲存券商名（unknow/unknown 不更新、不顯示）
+  if (useBroker) {
+    updateFileReport(targetFileId, result.report!);
   }
 
   if (!result.hasAnalysis || result.regions.length === 0) {
@@ -220,20 +258,32 @@ export async function mergePageResult(
 
   if (!isSessionValid(sessionId)) return [];
 
-  // 在 state updater 之外直接收集空文字 region（React 18 batching 會延遲 updater 執行）
-  const emptyRegions = regionsWithText.filter((r) => !r.text.trim());
-  if (emptyRegions.length > 0) {
+  // 在 state updater 之外直接收集需 AI 識別的 region：空文字 或 亂碼（CID passthrough、錯誤編碼等）
+  const toRecognize: Region[] = [];
+  let regionsToMerge = regionsWithText;
+  for (const r of regionsWithText) {
+    const t = r.text?.trim() ?? '';
+    if (!t) toRecognize.push(r);
+    else if (isGarbledText(t)) {
+      toRecognize.push({ ...r, text: '' }); // 亂碼清空文字，顯示為灰框並送 AI 識別
+      regionsToMerge = regionsToMerge.map((x) => (x === r ? { ...r, text: '' } : x));
+    }
+  }
+  if (toRecognize.length > 0) {
+    const emptyCount = regionsWithText.filter((r) => !r.text?.trim()).length;
+    const garbledCount = toRecognize.length - emptyCount;
     const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
-    console.log(`[analysisHelpers][${ts}] 🔘 Page ${pageNum}: ${emptyRegions.length} empty region(s) kept as gray (${regionsWithText.length} total)`);
+    const suffix = garbledCount > 0 ? `, ${garbledCount} garbled` : '';
+    console.log(`[analysisHelpers][${ts}] 🔘 Page ${pageNum}: ${toRecognize.length} region(s) → AI 識別 (${emptyCount} empty${suffix}, ${regionsWithText.length} total)`);
   }
 
-  // Merge：保留 userModified 的 regions，追加 AI 新結果
+  // Merge：保留 userModified 的 regions，追加 AI 新結果（亂碼已清空文字）
   const mergeUpdater = (prev: Map<number, Region[]>) => {
     const updated = new Map(prev);
     const existing = updated.get(pageNum) || [];
     const userRegions = existing.filter((r) => r.userModified);
     const maxExistingId = userRegions.reduce((max, r) => Math.max(max, r.id), 0);
-    const aiRegions = regionsWithText.map((r: Region, i: number) => ({
+    const aiRegions = regionsToMerge.map((r: Region, i: number) => ({
       ...r,
       id: maxExistingId + i + 1,
       userModified: false,
@@ -242,7 +292,7 @@ export async function mergePageResult(
     return updated;
   };
   updateFileRegions(targetFileId, mergeUpdater);
-  return emptyRegions;
+  return toRecognize;
 }
 
 /** 渲染 PDF 頁面到 canvas（不銷毀），供多次裁切複用。呼叫端負責 canvas.remove() */

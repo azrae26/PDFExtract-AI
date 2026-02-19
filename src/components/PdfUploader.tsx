@@ -1,7 +1,7 @@
 /**
  * 功能：左側設定面板（per-file 狀態顯示）
  * 職責：識別文字框 Prompt、識別表格/圖表 Prompt、模型選擇、API 金鑰設定（popover）、
- *       券商忽略末尾頁數設定、活躍檔案的進度顯示（已完成/分析頁數/總頁數/券商名）、per-file 停止/重新分析按鈕
+ *       券商忽略末尾頁數設定、券商名映射清單設定、活躍檔案的進度顯示（已完成/分析頁數/總頁數/券商名）、per-file 停止/重新分析按鈕
  * 依賴：react (useState, useRef, useEffect)、types.ts (FileEntry)
  *
  * 注意：PDF 上傳功能已移至全頁面拖放（PDFExtractApp），此面板不再處理檔案上傳
@@ -11,7 +11,7 @@
 'use client';
 
 import { useState, useRef, useEffect } from 'react';
-import { FileEntry } from '@/lib/types';
+import { FileEntry, MetadataCandidate } from '@/lib/types';
 
 /** Gemini 模型選項 */
 export const GEMINI_MODELS = [
@@ -47,10 +47,34 @@ interface PdfUploaderProps {
   fileName: string | null;
   /** 當前檔案的券商名（從 AI 分析結果取得） */
   report: string | null;
+  /** 日期候選值 */
+  dateCandidates: MetadataCandidate[];
+  /** 股票代號候選值 */
+  codeCandidates: MetadataCandidate[];
+  /** 券商候選值 */
+  brokerCandidates: MetadataCandidate[];
+  /** 已確認日期 */
+  selectedDate: string;
+  /** 已確認股票代號 */
+  selectedCode: string;
+  /** 已確認券商 */
+  selectedBroker: string;
+  /** 點擊候選值後確認該值 */
+  onSelectMetadata: (field: 'date' | 'code' | 'broker', value: string) => void;
+  /** 手動新增候選值 */
+  onAddMetadataCandidate: (field: 'date' | 'code' | 'broker', value: string) => void;
+  /** 刪除單一候選值 */
+  onRemoveMetadataCandidate: (field: 'date' | 'code' | 'broker', value: string) => void;
+  /** 一次清空欄位所有候選值 */
+  onClearMetadataCandidates: (field: 'date' | 'code' | 'broker') => void;
   /** 券商 → 忽略末尾頁數映射 */
   brokerSkipMap: Record<string, number>;
   /** 更新券商忽略末尾頁數映射 */
   onBrokerSkipMapChange: (map: Record<string, number>) => void;
+  /** 券商映射群組（每筆為逗號分隔清單，第一個值視為 canonical） */
+  brokerAliasGroups: string[];
+  /** 更新券商映射群組 */
+  onBrokerAliasGroupsChange: (groups: string[]) => void;
   /** 活躍檔案的狀態（用於按鈕判斷：processing/queued→停止分析，其餘→重新分析） */
   activeFileStatus?: FileEntry['status'];
   /** 上傳當前設定到伺服器 */
@@ -79,8 +103,20 @@ export default function PdfUploader({
   error,
   fileName,
   report,
+  dateCandidates,
+  codeCandidates,
+  brokerCandidates,
+  selectedDate,
+  selectedCode,
+  selectedBroker,
+  onSelectMetadata,
+  onAddMetadataCandidate,
+  onRemoveMetadataCandidate,
+  onClearMetadataCandidates,
   brokerSkipMap,
   onBrokerSkipMapChange,
+  brokerAliasGroups,
+  onBrokerAliasGroupsChange,
   activeFileStatus,
   onUploadSettings,
 }: PdfUploaderProps) {
@@ -96,15 +132,25 @@ export default function PdfUploader({
   const [brokerInput, setBrokerInput] = useState('');
   const [brokerDropdownOpen, setBrokerDropdownOpen] = useState(false);
   const brokerDropdownRef = useRef<HTMLDivElement>(null);
+  // 券商映射 combobox 狀態
+  const [aliasGroupInput, setAliasGroupInput] = useState('');
+  const [aliasDropdownOpen, setAliasDropdownOpen] = useState(false);
+  const aliasDropdownRef = useRef<HTMLDivElement>(null);
 
   const brokerNames = Object.keys(brokerSkipMap);
   const [newBrokerSkip, setNewBrokerSkip] = useState(4);
+  const [dateInput, setDateInput] = useState('');
+  const [codeInput, setCodeInput] = useState('');
+  const [metaBrokerInput, setMetaBrokerInput] = useState('');
   // 是否為已存在的券商
   const isExistingBroker = brokerInput.trim() !== '' && brokerSkipMap[brokerInput.trim()] !== undefined;
   // 是否為可新增的新券商（有名字但不存在）
   const isNewBroker = brokerInput.trim() !== '' && !isExistingBroker;
   // 顯示的頁數值：已存在 → map 中的值，新增 → local state
   const displaySkip = isExistingBroker ? brokerSkipMap[brokerInput.trim()] : newBrokerSkip;
+  const normalizedAliasInput = aliasGroupInput.trim();
+  const isExistingAliasGroup = normalizedAliasInput !== '' && brokerAliasGroups.includes(normalizedAliasInput);
+  const isNewAliasGroup = normalizedAliasInput !== '' && !isExistingAliasGroup;
 
   /** 選擇下拉項目 */
   const handleSelectBroker = (name: string) => {
@@ -141,6 +187,27 @@ export default function PdfUploader({
     setBrokerInput('');
   };
 
+  /** 選擇券商映射群組 */
+  const handleSelectAliasGroup = (group: string) => {
+    setAliasGroupInput(group);
+    setAliasDropdownOpen(false);
+  };
+
+  /** 新增券商映射群組 */
+  const handleAddAliasGroup = () => {
+    const value = aliasGroupInput.trim();
+    if (!value || isExistingAliasGroup) return;
+    onBrokerAliasGroupsChange([...brokerAliasGroups, value]);
+  };
+
+  /** 刪除目前選中的券商映射群組 */
+  const handleDeleteAliasGroup = () => {
+    const value = aliasGroupInput.trim();
+    if (!value || !isExistingAliasGroup) return;
+    onBrokerAliasGroupsChange(brokerAliasGroups.filter((g) => g !== value));
+    setAliasGroupInput('');
+  };
+
   // 當 AI 分析出券商名時，自動選到該券商
   useEffect(() => {
     if (report) {
@@ -157,6 +224,9 @@ export default function PdfUploader({
       if (brokerDropdownRef.current && !brokerDropdownRef.current.contains(e.target as Node)) {
         setBrokerDropdownOpen(false);
       }
+      if (aliasDropdownRef.current && !aliasDropdownRef.current.contains(e.target as Node)) {
+        setAliasDropdownOpen(false);
+      }
       // API 金鑰 popover：點擊按鈕或 popover 以外的區域才關閉
       const target = e.target as Node;
       const inBtn = apiKeyBtnRef.current?.contains(target);
@@ -168,6 +238,107 @@ export default function PdfUploader({
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
   }, []);
+
+  const normalizeValue = (value: string) => value.trim();
+
+  const handleMetaInputSubmit = (
+    field: 'date' | 'code' | 'broker',
+    inputValue: string,
+    setInput: (value: string) => void,
+  ) => {
+    const value = normalizeValue(inputValue);
+    if (!value) return;
+    onAddMetadataCandidate(field, value);
+    setInput('');
+  };
+
+  const renderMetaField = (
+    field: 'date' | 'code' | 'broker',
+    label: string,
+    candidates: MetadataCandidate[],
+    selected: string,
+    inputValue: string,
+    setInput: (value: string) => void,
+  ) => {
+    const selectedNorm = normalizeValue(selected).toLowerCase();
+    const hasAny = candidates.length > 0 || normalizeValue(inputValue) !== '';
+
+    const contentLen = candidates.reduce((sum, c) => sum + c.value.length, 0) + label.length;
+    const grow = Math.max(1, contentLen);
+    const chipsTotalW = candidates.reduce((sum, c) => sum + c.value.length * 6 + 20, 0);
+    const minW = Math.max(52, chipsTotalW + 24);
+
+    const inputId = `meta-input-${field}`;
+
+    return (
+      <div style={{ flex: `${grow} 1 auto`, minWidth: `${minW}px` }}>
+        <span className="text-[11px] leading-4 font-medium text-gray-500 mb-1 block">{label}</span>
+        {/* eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions */}
+        <div
+          className="flex items-center gap-1 border border-gray-300 rounded-lg bg-white px-2 py-1.5 min-h-[34px] cursor-text focus-within:ring-1 focus-within:ring-inset focus-within:ring-indigo-500"
+          onClick={() => document.getElementById(inputId)?.focus()}
+        >
+          <div className="flex flex-wrap items-center gap-0 flex-1 min-w-0 min-h-[24px]">
+            <div className="flex flex-wrap items-center gap-1 pr-1">
+              {candidates.map((candidate, idx) => {
+                const candidateNorm = normalizeValue(candidate.value).toLowerCase();
+                const isSelected = !!candidateNorm && candidateNorm === selectedNorm;
+                const sourceStyles = candidate.source === 'filename'
+                  ? { unselected: 'bg-indigo-50 border-indigo-500 hover:bg-indigo-100 text-indigo-700', selected: 'bg-indigo-500 text-white border border-indigo-500' }
+                  : candidate.source === 'ai'
+                    ? { unselected: 'bg-[#1EAE98]/10 border-[#1EAE98] hover:bg-[#1EAE98]/20 text-[#0D7A6B]', selected: 'bg-[#1EAE98] text-white border border-[#1EAE98]' }
+                    : { unselected: 'bg-[#ed4242]/10 border-[#ed4242] hover:bg-[#ed4242]/20 text-[#b82e2e]', selected: 'bg-[#ed4242] text-white border border-[#ed4242]' };
+                return (
+                  <button
+                    key={`${candidate.value}-${candidate.source}-${idx}`}
+                    type="button"
+                    onClick={(e) => { e.stopPropagation(); onSelectMetadata(field, candidate.value); }}
+                    className={`inline-flex items-center px-1.5 py-[2px] text-[12px] rounded-md transition-colors cursor-pointer whitespace-nowrap flex-shrink-0 ${
+                      isSelected
+                        ? sourceStyles.selected
+                        : `border ${sourceStyles.unselected}`
+                    }`}
+                  >
+                    <span>{candidate.value}</span>
+                  </button>
+                );
+              })}
+            </div>
+            <input
+              id={inputId}
+              type="text"
+              aria-label={label}
+              value={inputValue}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  handleMetaInputSubmit(field, inputValue, setInput);
+                }
+              }}
+              placeholder=""
+              className="w-4 flex-shrink-0 text-[12px] leading-5 bg-transparent outline-none border-none p-0 focus:ring-0 focus:outline-none"
+              style={{ width: inputValue ? `${Math.max(12, inputValue.length * 8 + 4)}px` : '12px' }}
+            />
+          </div>
+          {hasAny && (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                setInput('');
+                onClearMetadataCandidates(field);
+              }}
+              className="flex-shrink-0 text-gray-400 hover:text-red-500 text-[12px] leading-none px-0.5 cursor-pointer"
+              title="清空此欄全部值"
+            >
+              ✕
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  };
 
   return (
     <div className="w-full h-full flex flex-col border-r border-gray-200 bg-white overflow-hidden">
@@ -241,6 +412,14 @@ export default function PdfUploader({
           );
         })()}
 
+        {hasFile && (
+          <div className="flex flex-wrap gap-1.5 items-start mb-2">
+            {renderMetaField('date', '日期', dateCandidates, selectedDate, dateInput, setDateInput)}
+            {renderMetaField('code', '股票代號', codeCandidates, selectedCode, codeInput, setCodeInput)}
+            {renderMetaField('broker', '券商名', brokerCandidates, selectedBroker, metaBrokerInput, setMetaBrokerInput)}
+          </div>
+        )}
+
         {/* API 金鑰未設定提示 */}
         {!apiKey && (
           <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg flex items-center gap-2">
@@ -261,6 +440,80 @@ export default function PdfUploader({
         )}
 
         {/* 模型選擇 + 金鑰 + 同時分析頁數（同一行） */}
+        <div className="flex gap-1.5 items-end" ref={aliasDropdownRef}>
+          <div className="flex-1 min-w-0 relative">
+            <label className="text-[11px] leading-4 font-medium text-gray-500 mb-1.5 block">券商名映射</label>
+            <div className={`flex rounded-lg ring-1 ring-transparent transition-shadow ${aliasDropdownOpen ? 'ring-indigo-500' : ''} focus-within:ring-indigo-500`}>
+              <input
+                type="text"
+                value={aliasGroupInput}
+                onChange={(e) => {
+                  setAliasGroupInput(e.target.value);
+                  setAliasDropdownOpen(true);
+                }}
+                onFocus={() => setAliasDropdownOpen(true)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && aliasGroupInput.trim()) {
+                    if (isNewAliasGroup) handleAddAliasGroup();
+                    setAliasDropdownOpen(false);
+                  }
+                }}
+                placeholder="輸入映射清單（例：凱基, 凱基(法說memo), KGI）"
+                className="flex-1 min-w-0 px-2.5 py-1.5 text-[13px] leading-5 border border-gray-300 rounded-l-lg bg-white text-gray-800 focus:outline-none focus:ring-0 focus:border-transparent"
+              />
+              <button
+                type="button"
+                onClick={() => setAliasDropdownOpen((p) => !p)}
+                className="px-1.5 border border-l-0 border-gray-300 rounded-r-lg bg-gray-50 text-gray-500 hover:bg-gray-100 cursor-pointer flex items-center"
+              >
+                <svg className={`w-3.5 h-3.5 transition-transform ${aliasDropdownOpen ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" />
+                </svg>
+              </button>
+            </div>
+            {aliasDropdownOpen && brokerAliasGroups.length > 0 && (
+              <div className="absolute z-50 left-0 right-0 mt-1 max-h-56 overflow-y-auto bg-white border border-gray-300 rounded-lg shadow-lg">
+                {brokerAliasGroups.map((group) => (
+                  <button
+                    key={group}
+                    type="button"
+                    onClick={() => handleSelectAliasGroup(group)}
+                    className={`w-full text-left px-3 py-1.5 text-[13px] leading-5 hover:bg-indigo-50 cursor-pointer ${
+                      group === aliasGroupInput ? 'bg-indigo-50 text-indigo-700 font-medium' : 'text-gray-700'
+                    }`}
+                    title={group}
+                  >
+                    <span className="block truncate">{group}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+          {isNewAliasGroup ? (
+            <button
+              type="button"
+              onClick={handleAddAliasGroup}
+              className="w-8 h-[34px] flex items-center justify-center text-blue-500 hover:text-blue-700 hover:bg-blue-50 border border-gray-300 rounded-lg transition-colors cursor-pointer flex-shrink-0"
+              title="新增此映射清單"
+            >
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+              </svg>
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={handleDeleteAliasGroup}
+              disabled={!isExistingAliasGroup}
+              className="w-8 h-[34px] flex items-center justify-center text-gray-400 hover:text-red-500 hover:bg-red-50 border border-gray-300 rounded-lg transition-colors cursor-pointer disabled:text-gray-300 disabled:hover:bg-transparent disabled:cursor-not-allowed flex-shrink-0"
+              title="刪除此映射清單"
+            >
+              ✕
+            </button>
+          )}
+        </div>
+
+        {/* 模型選擇 + 金鑰 + 同時分析頁數（同一行） */}
         <div className="flex gap-2 items-end">
           <div className="flex-1 min-w-0">
             <label className="text-[11px] leading-4 font-medium text-gray-500 mb-1.5 block">模型</label>
@@ -268,7 +521,7 @@ export default function PdfUploader({
               <select
                 value={model}
                 onChange={(e) => onModelChange(e.target.value)}
-                className="w-full appearance-none pl-2.5 pr-7 py-1.5 text-[13px] leading-5 border border-gray-300 rounded-lg bg-gray-50 text-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent cursor-pointer"
+                className="w-full appearance-none pl-2.5 pr-7 py-1.5 text-[13px] leading-5 border border-gray-300 rounded-lg bg-gray-50 text-gray-800 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-transparent cursor-pointer"
               >
                 {GEMINI_MODELS.map((m) => (
                   <option key={m.id} value={m.id}>
@@ -316,7 +569,7 @@ export default function PdfUploader({
                 const v = parseInt(e.target.value, 10);
                 if (!isNaN(v) && v >= 1) onBatchSizeChange(Math.min(v, 50));
               }}
-              className="w-full pl-4 px-1.5 py-1.5 text-[13px] leading-5 text-center border border-gray-300 rounded-lg bg-gray-50 text-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              className="w-full pl-4 px-1.5 py-1.5 text-[13px] leading-5 text-center border border-gray-300 rounded-lg bg-gray-50 text-gray-800 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-transparent"
             />
           </div>
           <div className="w-[66px] flex-shrink-0">
@@ -330,7 +583,7 @@ export default function PdfUploader({
                 const v = parseInt(e.target.value, 10);
                 if (!isNaN(v) && v >= 0) onSkipLastPagesChange(v);
               }}
-              className="w-full pl-4 px-1.5 py-1.5 text-[13px] leading-5 text-center border border-gray-300 rounded-lg bg-gray-50 text-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              className="w-full pl-4 px-1.5 py-1.5 text-[13px] leading-5 text-center border border-gray-300 rounded-lg bg-gray-50 text-gray-800 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-transparent"
             />
           </div>
         </div>
@@ -340,7 +593,11 @@ export default function PdfUploader({
           {/* 券商名 combobox */}
           <div className="flex-1 min-w-0 relative">
             <label className="text-[11px] leading-4 font-medium text-gray-500 mb-1.5 block">券商忽略末尾頁數</label>
-            <div className="flex">
+            <div
+              className={`flex rounded-lg ring-1 ring-transparent transition-shadow ${
+                brokerDropdownOpen ? 'ring-indigo-500' : ''
+              } focus-within:ring-indigo-500`}
+            >
               <input
                 type="text"
                 value={brokerInput}
@@ -356,7 +613,7 @@ export default function PdfUploader({
                   }
                 }}
                 placeholder="輸入或選擇券商"
-                className="flex-1 min-w-0 px-2.5 py-1.5 text-[13px] leading-5 border border-gray-300 rounded-l-lg bg-white text-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                className="flex-1 min-w-0 px-2.5 py-1.5 text-[13px] leading-5 border border-gray-300 rounded-l-lg bg-white text-gray-800 focus:outline-none focus:ring-0 focus:border-transparent"
               />
               <button
                 type="button"
@@ -401,7 +658,7 @@ export default function PdfUploader({
               onKeyDown={(e) => { if (e.key === 'Enter' && isNewBroker) handleAddBroker(); }}
               disabled={!brokerInput.trim()}
               placeholder="—"
-              className="w-full px-1.5 py-1.5 text-[13px] leading-5 text-center border border-gray-300 rounded-lg bg-white text-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:bg-gray-100 disabled:text-gray-400"
+              className="w-full px-1.5 py-1.5 text-[13px] leading-5 text-center border border-gray-300 rounded-lg bg-white text-gray-800 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-transparent disabled:bg-gray-100 disabled:text-gray-400"
             />
           </div>
           {/* 新增(+) / 刪除(✕) 按鈕 — 依券商是否已存在切換 */}
@@ -435,7 +692,7 @@ export default function PdfUploader({
           <textarea
             value={prompt}
             onChange={(e) => onPromptChange(e.target.value)}
-            className="w-full h-[330px] p-2.5 py-2 text-[13px] border border-gray-300 rounded-lg resize-y focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-gray-50 text-gray-800 leading-relaxed"
+            className="w-full h-[330px] p-2.5 py-2 text-[13px] border border-gray-300 rounded-lg resize-y focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-transparent bg-gray-50 text-gray-800 leading-relaxed"
             placeholder="輸入分析指令..."
           />
         </div>
@@ -446,7 +703,7 @@ export default function PdfUploader({
           <textarea
             value={tablePrompt}
             onChange={(e) => onTablePromptChange(e.target.value)}
-            className="w-full h-[9rem] p-2.5 py-2 text-[13px] border border-gray-300 rounded-lg resize-y focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-gray-50 text-gray-800 leading-relaxed"
+            className="w-full h-[9rem] p-2.5 py-2 text-[13px] border border-gray-300 rounded-lg resize-y focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-transparent bg-gray-50 text-gray-800 leading-relaxed"
             placeholder="雙擊框框時，截圖該區域送 AI 所用的 Prompt..."
           />
         </div>
@@ -485,7 +742,7 @@ export default function PdfUploader({
                 }
               }}
               placeholder="輸入 Gemini API Key"
-              className="flex-1 min-w-0 px-2.5 py-1.5 text-[13px] border border-gray-300 rounded-lg bg-white text-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              className="flex-1 min-w-0 px-2.5 py-1.5 text-[13px] border border-gray-300 rounded-lg bg-white text-gray-800 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-transparent"
               autoFocus
             />
             <button

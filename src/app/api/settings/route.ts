@@ -14,7 +14,7 @@ import path from 'path';
 /** 允許同步的設定欄位白名單（排除 apiKey） */
 const ALLOWED_KEYS = [
   'prompt', 'tablePrompt', 'model', 'batchSize', 'skipLastPages',
-  'brokerSkipMap', 'fileListWidth', 'leftWidth', 'rightWidth',
+  'brokerSkipMap', 'brokerAliasGroups', 'fileListWidth', 'leftWidth', 'rightWidth',
 ] as const;
 
 /** 取得設定檔案完整路徑 */

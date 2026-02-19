@@ -246,7 +246,7 @@ export default function TextPanel({
             className={`flex items-center gap-1 text-xs font-medium px-3 py-1.5 rounded-md shadow-sm hover:shadow transition-all cursor-pointer ${
               copiedAll
                 ? 'bg-green-500 text-white'
-                : 'bg-blue-500 text-white hover:bg-blue-600 active:bg-blue-700'
+                : 'bg-indigo-500 text-white hover:bg-indigo-600 active:bg-indigo-700'
             }`}
           >
             {copiedAll ? (

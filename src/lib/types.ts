@@ -127,10 +127,20 @@ export interface Region {
   _debug?: RegionDebugInfo;
 }
 
+/** 單一欄位候選值（來源：檔名 / AI / 手動） */
+export interface MetadataCandidate {
+  value: string;
+  source: 'filename' | 'ai' | 'manual';
+}
+
 /** 單頁分析結果 */
 export interface PageAnalysis {
   page: number;
   hasAnalysis: boolean;
+  /** 報告日期（AI 回傳） */
+  date?: string;
+  /** 股票代號（AI 回傳） */
+  code?: string;
   /** 券商名（AI 回傳，同一份 PDF 各頁通常相同） */
   report?: string;
   regions: Region[];
@@ -173,6 +183,18 @@ export interface FileEntry {
   analysisPages: number;
   /** 已完成分析的頁數（per-file 追蹤，不論是否有 regions） */
   completedPages: number;
+  /** 日期候選值（檔名解析 + AI 回傳 + 手動輸入） */
+  dateCandidates?: MetadataCandidate[];
+  /** 股票代號候選值（檔名解析 + AI 回傳 + 手動輸入） */
+  codeCandidates?: MetadataCandidate[];
+  /** 券商名候選值（檔名解析 + AI 回傳 + 手動輸入） */
+  brokerCandidates?: MetadataCandidate[];
+  /** 使用者已確認日期 */
+  selectedDate?: string;
+  /** 使用者已確認股票代號 */
+  selectedCode?: string;
+  /** 使用者已確認券商名 */
+  selectedBroker?: string;
   /** 券商名（從 AI 分析結果取得） */
   report?: string;
 }

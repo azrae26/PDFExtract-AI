@@ -28,8 +28,9 @@ interface FileListPanelProps {
 
 /** 計算單檔實際要分析的頁數（numPages - effectiveSkip） */
 function getPagesToAnalyze(entry: FileEntry, brokerSkipMap: Record<string, number>, skipLastPages: number): number {
-  const effectiveSkip = (entry.report && brokerSkipMap[entry.report] !== undefined)
-    ? brokerSkipMap[entry.report]
+  const broker = entry.selectedBroker || entry.report;
+  const effectiveSkip = (broker && brokerSkipMap[broker] !== undefined)
+    ? brokerSkipMap[broker]
     : skipLastPages;
   return Math.max(1, entry.numPages - effectiveSkip);
 }

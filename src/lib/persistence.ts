@@ -31,6 +31,12 @@ interface SerializedFileEntry {
   pageRegions: [number, SerializedRegion[]][];
   analysisPages: number;
   completedPages: number;
+  dateCandidates?: FileEntry['dateCandidates'];
+  codeCandidates?: FileEntry['codeCandidates'];
+  brokerCandidates?: FileEntry['brokerCandidates'];
+  selectedDate?: string;
+  selectedCode?: string;
+  selectedBroker?: string;
   report?: string;
 }
 
@@ -97,6 +103,12 @@ function serializeFiles(files: FileEntry[]): SerializedFileEntry[] {
     ),
     analysisPages: f.analysisPages,
     completedPages: f.completedPages,
+    dateCandidates: f.dateCandidates ?? [],
+    codeCandidates: f.codeCandidates ?? [],
+    brokerCandidates: f.brokerCandidates ?? [],
+    selectedDate: f.selectedDate ?? '',
+    selectedCode: f.selectedCode ?? '',
+    selectedBroker: f.selectedBroker ?? '',
     report: f.report,
   }));
 }
@@ -199,6 +211,12 @@ export async function loadSession(): Promise<RestoredSession | null> {
         pageRegions,
         analysisPages: sf.analysisPages,
         completedPages: sf.completedPages,
+        dateCandidates: sf.dateCandidates ?? [],
+        codeCandidates: sf.codeCandidates ?? [],
+        brokerCandidates: sf.brokerCandidates ?? [],
+        selectedDate: sf.selectedDate ?? '',
+        selectedCode: sf.selectedCode ?? '',
+        selectedBroker: sf.selectedBroker ?? '',
         report: sf.report,
       });
     }

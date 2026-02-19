@@ -1,6 +1,6 @@
 /**
  * 功能：PDFExtract AI 主應用元件
- * 職責：管理 UI 配置狀態（prompt / model / 面板寬度等）、Region CRUD、四欄佈局渲染、
+ * 職責：管理 UI 配置狀態（prompt / model / 券商設定 / 面板寬度等）、Region CRUD、四欄佈局渲染、
  *       hover / scroll 互動、全頁面三區域拖放上傳（左=背景跑、中=當前頁並跑、右=僅加入列表）
  * 依賴：useFileManager hook（檔案生命週期 + 分析流程）、usePanelResize hook（面板拖動 resize）、
  *       FileListPanel、PdfUploader、PdfViewer、TextPanel
@@ -22,7 +22,7 @@ import TextPanel from './TextPanel';
 import FileListPanel from './FileListPanel';
 import { Region } from '@/lib/types';
 import { DEFAULT_PROMPT, DEFAULT_TABLE_PROMPT } from '@/lib/constants';
-import { DEFAULT_BROKER_SKIP_MAP } from '@/lib/brokerUtils';
+import { DEFAULT_BROKER_ALIAS_GROUPS, DEFAULT_BROKER_SKIP_MAP } from '@/lib/brokerUtils';
 import { DEFAULT_MODEL } from './PdfUploader';
 import useFileManager from '@/hooks/useFileManager';
 import usePanelResize from '@/hooks/usePanelResize';
@@ -99,6 +99,17 @@ export default function PDFExtractApp() {
     }
     return { ...DEFAULT_BROKER_SKIP_MAP };
   });
+  // 券商映射群組（例：凱基, 凱基(法說memo), 凱基(一般報告), KGI）
+  const [brokerAliasGroups, setBrokerAliasGroups] = useState<string[]>(() => {
+    const cfg = loadConfig();
+    if (Array.isArray(cfg.brokerAliasGroups)) {
+      return (cfg.brokerAliasGroups as unknown[])
+        .filter((v): v is string => typeof v === 'string')
+        .map((s) => s.trim())
+        .filter(Boolean);
+    }
+    return [...DEFAULT_BROKER_ALIAS_GROUPS];
+  });
 
   /** DEVMODE: 初始設定載入完成後才啟用自動上傳，避免載入設定時觸發上傳 */
   const devAutoUploadReadyRef = useRef(false);
@@ -127,9 +138,10 @@ export default function PDFExtractApp() {
     analyzingPagesMap, queuedPagesMap, cancelQueuedPage,
     analysisFileIdRef,
     handleStopFile, handleReanalyzeFile, triggerQueueProcessing,
+    selectFileMetadata, addFileMetadataCandidate, removeFileMetadataCandidate, clearFileMetadataCandidates,
     mountedFileIds,
   } = useFileManager({
-    prompt, tablePrompt, model, batchSize, skipLastPages, brokerSkipMap, apiKey,
+    prompt, tablePrompt, model, batchSize, skipLastPages, brokerSkipMap, brokerAliasGroups, apiKey,
   });
 
   // === usePanelResize Hook（四欄分界線拖動）===
@@ -146,6 +158,7 @@ export default function PDFExtractApp() {
   useEffect(() => { saveConfig({ batchSize }); }, [batchSize]);
   useEffect(() => { saveConfig({ skipLastPages }); }, [skipLastPages]);
   useEffect(() => { saveConfig({ brokerSkipMap }); }, [brokerSkipMap]);
+  useEffect(() => { saveConfig({ brokerAliasGroups }); }, [brokerAliasGroups]);
   useEffect(() => { saveConfig({ apiKey }); }, [apiKey]);
   useEffect(() => { saveConfig({ fileListWidth }); }, [fileListWidth]);
   useEffect(() => { saveConfig({ leftWidth }); }, [leftWidth]);
@@ -165,6 +178,14 @@ export default function PDFExtractApp() {
         if (typeof d.skipLastPages === 'number') setSkipLastPages(d.skipLastPages);
         if (typeof d.brokerSkipMap === 'object' && d.brokerSkipMap !== null) {
           setBrokerSkipMap(d.brokerSkipMap);
+        }
+        if (Array.isArray(d.brokerAliasGroups)) {
+          setBrokerAliasGroups(
+            (d.brokerAliasGroups as unknown[])
+              .filter((v): v is string => typeof v === 'string')
+              .map((s) => s.trim())
+              .filter(Boolean)
+          );
         }
         if (typeof d.fileListWidth === 'number') setFileListWidth(d.fileListWidth);
         if (typeof d.leftWidth === 'number') setLeftWidth(d.leftWidth);
@@ -198,6 +219,7 @@ export default function PDFExtractApp() {
 
     const settings = {
       prompt, tablePrompt, model, batchSize, skipLastPages, brokerSkipMap,
+      brokerAliasGroups,
       fileListWidth, leftWidth, rightWidth,
     };
 
@@ -216,7 +238,7 @@ export default function PDFExtractApp() {
     } catch {
       alert('上傳失敗：無法連線到伺服器');
     }
-  }, [prompt, tablePrompt, model, batchSize, skipLastPages, brokerSkipMap, fileListWidth, leftWidth, rightWidth]);
+  }, [prompt, tablePrompt, model, batchSize, skipLastPages, brokerSkipMap, brokerAliasGroups, fileListWidth, leftWidth, rightWidth]);
 
   // === DEVMODE: 任何設定改動後 5 秒自動上傳到伺服器（免密碼） ===
   useEffect(() => {
@@ -225,6 +247,7 @@ export default function PDFExtractApp() {
     const timer = setTimeout(async () => {
       const settings = {
         prompt, tablePrompt, model, batchSize, skipLastPages, brokerSkipMap,
+        brokerAliasGroups,
         fileListWidth, leftWidth, rightWidth,
       };
       try {
@@ -244,7 +267,7 @@ export default function PDFExtractApp() {
     }, 5000);
 
     return () => clearTimeout(timer);
-  }, [prompt, tablePrompt, model, batchSize, skipLastPages, brokerSkipMap, fileListWidth, leftWidth, rightWidth]);
+  }, [prompt, tablePrompt, model, batchSize, skipLastPages, brokerSkipMap, brokerAliasGroups, fileListWidth, leftWidth, rightWidth]);
 
   // === 切換活躍檔案 ===
   const handleSelectFile = useCallback((fileId: string) => {
@@ -374,6 +397,9 @@ export default function PDFExtractApp() {
         updated.set(page, newList);
         return updated;
       });
+
+      // 右欄自動滾動到新出現的文字框
+      setScrollToTextKey(`${page}-${newId}`);
 
       try {
         if (!pdfDocRef.current) return;
@@ -533,6 +559,13 @@ export default function PDFExtractApp() {
     </div>
   );
 
+  const activeBroker = activeFile?.selectedBroker || activeFile?.report || '';
+  const activeRawReport = activeFile?.report || '';
+  const effectiveSkipForActive =
+    (activeRawReport && brokerSkipMap[activeRawReport] !== undefined) ? brokerSkipMap[activeRawReport]
+    : (activeBroker && brokerSkipMap[activeBroker] !== undefined) ? brokerSkipMap[activeBroker]
+    : skipLastPages;
+
   return (
     <div
       className="flex h-screen bg-gray-50 overflow-hidden relative"
@@ -635,15 +668,12 @@ export default function PDFExtractApp() {
           apiKey={apiKey}
           onApiKeyChange={setApiKey}
           isAnalyzing={activeFile?.status === 'processing'}
-          progress={{ current: activeFile?.pageRegions?.size ?? 0, total: Math.max(1, numPages - ((activeFile?.report && brokerSkipMap[activeFile.report] !== undefined) ? brokerSkipMap[activeFile.report] : skipLastPages)) }}
+          progress={{ current: activeFile?.pageRegions?.size ?? 0, total: Math.max(1, numPages - effectiveSkipForActive) }}
           numPages={numPages}
           onReanalyze={() => {
             if (!activeFileId || !activeFile || !apiKey) return;
             // 若檔案已有券商名且在 brokerSkipMap 中有設定，優先使用券商特定值
-            const effectiveSkipRe = (activeFile.report && brokerSkipMap[activeFile.report] !== undefined)
-              ? brokerSkipMap[activeFile.report]
-              : skipLastPages;
-            handleReanalyzeFile(Math.max(1, numPages - effectiveSkipRe), activeFileId, activeFile.url);
+            handleReanalyzeFile(Math.max(1, numPages - effectiveSkipForActive), activeFileId, activeFile.url);
           }}
           onStop={() => {
             if (activeFileId) handleStopFile(activeFileId);
@@ -651,9 +681,33 @@ export default function PDFExtractApp() {
           hasFile={!!activeFile}
           error={error}
           fileName={activeFile?.name ?? null}
-          report={activeFile?.report ?? null}
+          report={activeFile?.report || activeBroker || null}
+          dateCandidates={activeFile?.dateCandidates ?? []}
+          codeCandidates={activeFile?.codeCandidates ?? []}
+          brokerCandidates={activeFile?.brokerCandidates ?? []}
+          selectedDate={activeFile?.selectedDate ?? ''}
+          selectedCode={activeFile?.selectedCode ?? ''}
+          selectedBroker={activeBroker}
+          onSelectMetadata={(field, value) => {
+            if (!activeFileId) return;
+            selectFileMetadata(activeFileId, field, value);
+          }}
+          onAddMetadataCandidate={(field, value) => {
+            if (!activeFileId) return;
+            addFileMetadataCandidate(activeFileId, field, value);
+          }}
+          onRemoveMetadataCandidate={(field, value) => {
+            if (!activeFileId) return;
+            removeFileMetadataCandidate(activeFileId, field, value);
+          }}
+          onClearMetadataCandidates={(field) => {
+            if (!activeFileId) return;
+            clearFileMetadataCandidates(activeFileId, field);
+          }}
           brokerSkipMap={brokerSkipMap}
           onBrokerSkipMapChange={setBrokerSkipMap}
+          brokerAliasGroups={brokerAliasGroups}
+          onBrokerAliasGroupsChange={setBrokerAliasGroups}
           activeFileStatus={activeFile?.status}
           onUploadSettings={handleUploadSettings}
         />

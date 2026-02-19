@@ -110,7 +110,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<AnalyzeRe
     const parsed = JSON.parse(jsonStr);
 
     console.log(
-      `[AnalyzeRoute][${timestamp}] ✅ Page ${page}: hasAnalysis=${parsed.hasAnalysis}, regions=${parsed.regions?.length ?? 0}${parsed.report ? `, report=${parsed.report}` : ''}`
+      `[AnalyzeRoute][${timestamp}] ✅ Page ${page}: hasAnalysis=${parsed.hasAnalysis}, regions=${parsed.regions?.length ?? 0}${parsed.date ? `, date=${parsed.date}` : ''}${parsed.code ? `, code=${parsed.code}` : ''}${parsed.report ? `, report=${parsed.report}` : ''}`
     );
 
     return NextResponse.json({
@@ -118,6 +118,8 @@ export async function POST(request: NextRequest): Promise<NextResponse<AnalyzeRe
       data: {
         page,
         hasAnalysis: parsed.hasAnalysis ?? false,
+        date: parsed.date ?? undefined,
+        code: parsed.code ?? undefined,
         report: parsed.report ?? undefined,
         regions: (parsed.regions ?? []).map((r: Record<string, unknown>, i: number) => {
           // Gemini 原生 bbox 格式為 [y1, x1, y2, x2]，轉換為前端使用的 [x1, y1, x2, y2]

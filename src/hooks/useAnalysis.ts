@@ -22,6 +22,7 @@ import { Region } from '@/lib/types';
 import {
   FileRegionsUpdater,
   FileReportUpdater,
+  FileMetadataUpdater,
   FileProgressUpdater,
   analyzePageWithRetry,
   mergePageResult,
@@ -36,6 +37,8 @@ interface UseAnalysisOptions {
   updateFileRegions: FileRegionsUpdater;
   /** 更新指定檔案的券商名（report） */
   updateFileReport: FileReportUpdater;
+  /** 更新指定檔案的 metadata 候選值（date/code/broker） */
+  updateFileMetadata: FileMetadataUpdater;
   /** 更新指定檔案的 per-file 分析進度 */
   updateFileProgress: FileProgressUpdater;
   prompt: string;
@@ -50,6 +53,7 @@ export default function useAnalysis({
   pdfDocRef,
   updateFileRegions,
   updateFileReport,
+  updateFileMetadata,
   updateFileProgress,
   prompt,
   tablePrompt,
@@ -574,7 +578,17 @@ export default function useAnalysis({
         if (!isSessionValid(sessionId)) return;
 
         if (result) {
-          const emptyRegions = await mergePageResult(pageNum, result, pdfDoc, sessionId, isSessionValid, fileId, updateFileRegions, updateFileReport);
+          const emptyRegions = await mergePageResult(
+            pageNum,
+            result,
+            pdfDoc,
+            sessionId,
+            isSessionValid,
+            fileId,
+            updateFileRegions,
+            updateFileReport,
+            updateFileMetadata,
+          );
 
           // === 空文字 region → 插入識別任務到 queue 前端（插隊，與頁面分析並行處理）===
           if (emptyRegions.length > 0 && isSessionValid(sessionId)) {
@@ -645,7 +659,7 @@ export default function useAnalysis({
         console.log(`[useAnalysis][${endTimestamp}] 🏁 All analysis complete (session=${sessionId}).`);
       }
     },
-    [updateFileRegions, updateFileReport, updateFileProgress, isSessionValid, addAnalyzingPage, removeAnalyzingPage]
+    [updateFileRegions, updateFileReport, updateFileMetadata, updateFileProgress, isSessionValid, addAnalyzingPage, removeAnalyzingPage]
   );
 
   // === 停止分析 ===
@@ -820,7 +834,17 @@ export default function useAnalysis({
       let injectedToPool = false;
 
       if (result && isSessionValid(sessionId)) {
-        const emptyRegions = await mergePageResult(pageNum, result, pdfDoc, sessionId, isSessionValid, targetFileId, updateFileRegions, updateFileReport);
+        const emptyRegions = await mergePageResult(
+          pageNum,
+          result,
+          pdfDoc,
+          sessionId,
+          isSessionValid,
+          targetFileId,
+          updateFileRegions,
+          updateFileReport,
+          updateFileMetadata,
+        );
 
         // === 空文字 region → 識別任務進入隊列 ===
         if (emptyRegions.length > 0 && isSessionValid(sessionId)) {
@@ -956,7 +980,7 @@ export default function useAnalysis({
         }
       }
     },
-    [prompt, model, tablePrompt, batchSize, apiKey, pdfDocRef, updateFileRegions, updateFileReport, updateFileProgress, isSessionValid, queuedPagesMap, addAnalyzingPage, removeAnalyzingPage]
+    [prompt, model, tablePrompt, batchSize, apiKey, pdfDocRef, updateFileRegions, updateFileReport, updateFileMetadata, updateFileProgress, isSessionValid, queuedPagesMap, addAnalyzingPage, removeAnalyzingPage]
   );
 
   return {

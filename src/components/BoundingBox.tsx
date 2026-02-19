@@ -116,6 +116,9 @@ export default function BoundingBox({
 
   // Debug 複製狀態
   const [debugCopied, setDebugCopied] = useState(false);
+  const hits = region._debug?.hits ?? [];
+  const hitsCount = hits.length;
+  const hitsDetail = hits.map((h, i) => ({ i, str: h.str }));
   const handleCopyDebug = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
     const [x1, y1, x2, y2] = region.bbox;
@@ -137,6 +140,11 @@ export default function BoundingBox({
     if (region.userModified) {
       debugInfo.userModified = true;
     }
+    // HIT 數量與每個 HIT 的字元摘要（便於除錯）
+    if (hitsCount > 0) {
+      debugInfo.hitsCount = hitsCount;
+      debugInfo.hitsDetail = hitsDetail;
+    }
     // 提取流程的完整 debug 資料（各 phase bbox 快照 + hits + 多欄 + 行分組）
     if (region._debug) {
       debugInfo.extractionDebug = region._debug;
@@ -146,7 +154,7 @@ export default function BoundingBox({
       setDebugCopied(true);
       setTimeout(() => setDebugCopied(false), 1500);
     });
-  }, [region, displayWidth, displayHeight, pageNumber]);
+  }, [region, displayWidth, displayHeight, pageNumber, hits, hitsCount, hitsDetail]);
 
   // === 按鈕定位：一律往右外移；高度足夠時靠上緣，太小時以中線為中心對稱分佈 ===
   const btnPairHeight = 44; // 20px button + 4px gap + 20px button
@@ -254,7 +262,7 @@ export default function BoundingBox({
             e.stopPropagation();
             handleCopyDebug(e);
           }}
-          title="複製 debug 參數到剪貼簿"
+          title={hitsCount > 0 ? `複製 debug（${hitsCount} HITs）` : '複製 debug 參數到剪貼簿'}
         >
           {debugCopied ? '✓' : '⎘'}
         </button>
