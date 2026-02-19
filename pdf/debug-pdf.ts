@@ -380,9 +380,9 @@ function groupItemsIntoDisplayLines(items: NormTextItem[]) {
 // ============================================================
 
 /** Snap + 前後對比 log */
-function snapWithLog(bbox: Bbox, items: NormTextItem[]) {
+function snapWithLog(bbox: Bbox, items: NormTextItem[], otherBboxes?: Bbox[]) {
   const original: Bbox = [...bbox];
-  const result = snapBboxToText([...bbox], items);
+  const result = snapBboxToText([...bbox], items, undefined, otherBboxes);
   const log: string[] = [];
   const labels = ['x1', 'y1', 'x2', 'y2'];
   for (let i = 0; i < 4; i++) {
@@ -571,8 +571,10 @@ async function cmdExtract(filePath: string, pageNum: number, bboxStrs: string[])
   console.log(`  Phase 1: Snap (水平校正 + Y 軸半行補足)`);
   console.log(`${'─'.repeat(50)}`);
 
+  const originalBboxes = bboxes.map(b => [...b] as Bbox);
   const snapped: Bbox[] = bboxes.map((b, i) => {
-    const { bbox: result, log } = snapWithLog(b, items);
+    const others = originalBboxes.filter((_, j) => j !== i);
+    const { bbox: result, log } = snapWithLog(b, items, others.length > 0 ? others : undefined);
     const changed = log.length > 0;
     console.log(`  box${i + 1}: [${b.map(v => Math.round(v)).join(',')}] → [${result.map(v => Math.round(v)).join(',')}]${changed ? '' : ' (不變)'}`);
     if (log.length > 0) {

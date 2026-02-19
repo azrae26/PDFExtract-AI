@@ -7,8 +7,9 @@
  *       直接 import，確保演算法只有一份
  * 依賴：無
  * 演算法邏輯順序（主 pipeline）：
- * Phase 1   ：snapBboxToText             — 自動校正 bbox 邊界 + 歸屬判斷（退一半覆蓋量→行距 override）
- *               ├─ checkOwnership        — 退一半覆蓋量 + 行距 override（內部函式）
+ * Phase 0   ：findContainedBboxes        — 去除被其他框 95% 包含的框（面積交集比例）
+ * Phase 1   ：snapBboxToText             — 自動校正 bbox 邊界 + 歸屬判斷（退一半→行距歸屬→佔比 fallback）
+ *               ├─ checkOwnership        — 退一半→行距歸屬→佔比 fallback（內部函式）
  *               └─ lineSpacingOwnership  — 行距歸屬判斷（內部函式）
  * Phase 2   ：(resolveOverlappingLines 已移除，功能已整合進 Phase 1)
  * Phase 2.25：resolveXOverlaps           — 解決 snap 後的 X 方向重疊
@@ -84,9 +85,11 @@ export interface Hit {
 /** 歸一化座標上限 */
 export const NORMALIZED_MAX = 1000;
 /** 交集擴展最大迭代次數 */
-export const SNAP_MAX_ITERATIONS = 3;
+export const SNAP_MAX_ITERATIONS = 6;
 /** 重疊比例閾值：文字項目在框內的比例超過此值才納入擴展（避免吃到相鄰區塊） */
 export const SNAP_OVERLAP_RATIO = 0.5;
+/** 行集合匹配閾值（歸一化單位）：外部 baseline 需在此範圍內對上框內 baseline，才視為同一行集合 */
+export const LINE_SET_MATCH_THRESHOLD = 3;
 /** 同一行判定閾值（歸一化單位，Y 差距小於此值視為同一行） */
 export const SAME_LINE_THRESHOLD = 15;
 /** 框間最小垂直間距（歸一化單位），擴張後上下太近時各自退縮 */
@@ -105,6 +108,8 @@ export const VISUAL_TOP_RATIO_CJK = 0.10;
 export const VISUAL_BOTTOM_RATIO = 0.05;
 /** Y 重疊行合併最小重疊量（歸一化單位）：防止相鄰行因 baseline ≈ normY 產生浮點微小重疊而誤合併 */
 export const Y_OVERLAP_MIN = 2;
+/** 包含比例閾值：框 A 的面積有 ≥ 此比例被框 B 包含 → 移除框 A（Phase 0 去重） */
+export const CONTAINMENT_RATIO = 0.95;
 
 // === 多欄偵測常數 ===
 /** 投影法桶寬（歸一化單位，X 軸離散化精度） */
@@ -218,6 +223,51 @@ export function sanitizePuaChars(text: string): string {
 }
 
 // ============================================================
+// Phase 0: 去除被包含的框
+// ============================================================
+
+/**
+ * 移除被其他框高度包含（面積交集 ≥ CONTAINMENT_RATIO）的框
+ * @param bboxes - 所有框的 [x1,y1,x2,y2] 陣列
+ * @returns 要移除的 index 集合
+ */
+export function findContainedBboxes(
+  bboxes: [number, number, number, number][]
+): Set<number> {
+  const removed = new Set<number>();
+  for (let i = 0; i < bboxes.length; i++) {
+    if (removed.has(i)) continue;
+    for (let j = i + 1; j < bboxes.length; j++) {
+      if (removed.has(j)) continue;
+      const [ax1, ay1, ax2, ay2] = bboxes[i];
+      const [bx1, by1, bx2, by2] = bboxes[j];
+
+      // 交集
+      const ix1 = Math.max(ax1, bx1);
+      const iy1 = Math.max(ay1, by1);
+      const ix2 = Math.min(ax2, bx2);
+      const iy2 = Math.min(ay2, by2);
+      if (ix1 >= ix2 || iy1 >= iy2) continue; // 無交集
+      const interArea = (ix2 - ix1) * (iy2 - iy1);
+
+      const areaA = (ax2 - ax1) * (ay2 - ay1);
+      const areaB = (bx2 - bx1) * (by2 - by1);
+
+      // A 被 B 包含
+      if (areaA > 0 && interArea / areaA >= CONTAINMENT_RATIO) {
+        removed.add(i);
+        break; // i 已被移除，不再配對
+      }
+      // B 被 A 包含
+      if (areaB > 0 && interArea / areaB >= CONTAINMENT_RATIO) {
+        removed.add(j);
+      }
+    }
+  }
+  return removed;
+}
+
+// ============================================================
 // Phase 1: Snap — bbox 自動校正
 // ============================================================
 
@@ -291,10 +341,10 @@ function lineSpacingOwnership(
 
 /**
  * 歸屬判斷：textItem 是否屬於當前 bbox
- * 判斷順序：退一半覆蓋量 → 行距歸屬（覆蓋量輸時 override）→ 覆蓋量 fallback
- * 1. 退一半覆蓋量：與每個 otherBbox 計算重疊中點，用退一半後位置比較覆蓋量
- * 2. 行距歸屬：覆蓋量判為「不是我的」時，檢查上下鄰居行距，行距小的那邊可 override
- * 3. 覆蓋量 fallback：行距無法判斷時（行距相等/鄰居不明），回到覆蓋量結論
+ * 判斷順序：退一半 → 行距歸屬（主要）→ 佔比歸屬（fallback）
+ * 1. 退一半：與每個 otherBbox 計算重疊中點，各退一半建立邊界
+ * 2. 行距歸屬：檢查上下鄰居行距，行距小的那邊歸屬（主要決策者）
+ * 3. 佔比歸屬：行距無法判斷時（行距相等/鄰居不明），用退一半後覆蓋量決定
  * @param myBbox 當前 bbox 的原始座標
  * @param otherBboxes 其他 region 的原始 bbox
  * @param ti 被判斷的 textItem
@@ -316,15 +366,24 @@ function checkOwnership(
     const xOverlap = Math.min(myBbox[2], other[2]) - Math.max(myBbox[0], other[0]);
     if (xOverlap <= 0) continue;
 
-    // 計算當前 bbox 和此 otherBbox 的 Y 方向重疊
+    // 快速判定：text item 完全在 myBbox 的 Y 範圍內，但不在 other 的 Y 範圍內
+    // → 歸屬無爭議，跳過此 other（避免 lineSpacingOwnership 因遠處鄰居誤判）
+    const tiInMy = ti.normY >= myBbox[1] && ti.normBaseline <= myBbox[3];
+    const tiInOther = ti.normY >= other[1] && ti.normBaseline <= other[3];
+    if (tiInMy && !tiInOther) continue;
+
+    // Step 1：退一半 — 計算重疊中點，建立邊界
     const pairOverlapTop = Math.max(myBbox[1], other[1]);
     const pairOverlapBottom = Math.min(myBbox[3], other[3]);
+
+    // 無重疊守衛：兩框垂直完全不重疊，且文字不在 other 框內 → 無實際爭搶，跳過
+    // 解決框間 gap 中的文字因 lineSpacingOwnership 被誤判給碰不到的框的問題
+    if (pairOverlapBottom <= pairOverlapTop && !tiInOther) continue;
 
     let myEffY1 = myBbox[1], myEffY2 = myBbox[3];
     let otherEffY1 = other[1], otherEffY2 = other[3];
 
     if (pairOverlapBottom > pairOverlapTop) {
-      // 有重疊：各退一半到中點
       const mid = (pairOverlapTop + pairOverlapBottom) / 2;
       if (myBbox[1] <= other[1]) {
         myEffY2 = Math.min(myEffY2, mid);
@@ -335,17 +394,16 @@ function checkOwnership(
       }
     }
 
-    // 用退一半後的位置計算覆蓋量
+    // Step 2：行距歸屬 — 主要決策（行距能判就用行距）
+    const lsResult = lineSpacingOwnership(myBbox, other, ti, textItems);
+    if (lsResult === true) continue;   // 行距說是我的 → 繼續檢查下一個 other
+    if (lsResult === false) return false; // 行距說不是我的 → 確定不是我的
+
+    // Step 3：佔比歸屬 — fallback（行距無法判斷時）
     const myCoverage = Math.max(0, Math.min(tiBottomForOverlap, myEffY2) - Math.max(ti.normY, myEffY1));
     const otherCoverage = Math.max(0, Math.min(tiBottomForOverlap, otherEffY2) - Math.max(ti.normY, otherEffY1));
 
-    if (otherCoverage > myCoverage) {
-      // 覆蓋量判為「不是我的」→ 用行距歸屬 override
-      const lsResult = lineSpacingOwnership(myBbox, other, ti, textItems);
-      if (lsResult === true) continue;  // 行距說是我的 → override，繼續檢查下一個 other
-      // lsResult === false 或 null → 維持覆蓋量結論
-      return false;
-    }
+    if (otherCoverage > myCoverage) return false;
     // myCoverage >= otherCoverage → 是我的，繼續檢查下一個 other
   }
 
@@ -357,9 +415,9 @@ function checkOwnership(
  * - 水平方向：重疊比例 >= 50% 才擴展（避免吃到相鄰區塊）
  * - 垂直方向：只要框碰到該行就補足到完整行高（任何重疊即擴展）
  * - 歸屬判斷（同時控制擴展和退縮）：
- *   1. 退一半覆蓋量：與每個 otherBbox 計算重疊中點，用退一半後位置比較覆蓋量
- *   2. 行距歸屬 override：覆蓋量判為「不是我的」時，檢查上下鄰居行距，行距小的那邊可 override
- *   3. 覆蓋量 fallback：行距無法判斷時回到覆蓋量結論
+ *   1. 退一半：與每個 otherBbox 計算重疊中點，各退一半建立邊界
+ *   2. 行距歸屬：檢查上下鄰居行距，行距小的那邊歸屬（主要決策者）
+ *   3. 佔比歸屬 fallback：行距無法判斷時（行距相等/鄰居不明），用退一半後覆蓋量決定
  * - 降部補償不在此處加入 — 由外層在 enforce 之後獨立處理，避免汙染後續校正階段的座標
  * @param snapDebug 可選 debug 收集器 — 傳入時會記錄迭代次數和觸發擴展的 text items
  * @param otherBboxes 可選 — 其他 region 的原始 bbox（用於歸屬判斷，避免吃到鄰框文字）
@@ -378,12 +436,71 @@ export function snapBboxToText(
   let x2Trigger: SnapDebugCollector['triggers'][0] | null = null;
   let y2Trigger: SnapDebugCollector['triggers'][0] | null = null;
 
-  // 迭代擴展 — 只納入重疊比例 >= 50% 的文字項目
+  // 迭代擴展 — 只納入重疊比例 >= 50% 的文字項目，並跨越同行小間隔
   let changed = true;
   let iterations = 0;
   while (changed && iterations < SNAP_MAX_ITERATIONS) {
     changed = false;
     iterations++;
+
+    // 收集框內已有文字的 baseline + 邊界，用於間隔/鄰接跨越的同行判定
+    const insideBaselines: number[] = [];
+    const insideStrongBaselines: number[] = [];
+    const insideEdges: { baseline: number; left: number; right: number }[] = [];
+    for (const t of textItems) {
+      const tR = t.normX + t.normW;
+      const tB = t.normY + t.normH;
+      const tCJK = hasCJK(t.str);
+      const tBOv = tB + t.normH * (tCJK ? DESCENDER_RATIO_CJK : DESCENDER_RATIO);
+      const ovX = Math.min(tR, x2) - Math.max(t.normX, x1);
+      const ovY = Math.min(tBOv, y2) - Math.max(t.normY, y1);
+      if (ovX > 0 && ovY > 0) {
+        insideBaselines.push(t.normBaseline);
+        const tXRatio = t.normW > 0 ? ovX / t.normW : 0;
+        if (tXRatio >= SNAP_OVERLAP_RATIO) {
+          insideStrongBaselines.push(t.normBaseline);
+          insideEdges.push({ baseline: t.normBaseline, left: t.normX, right: tR });
+        }
+      }
+    }
+
+    const hasLineSetSubsetMatch = (
+      side: 'left' | 'right',
+      candidateEdge: number,
+    ): boolean => {
+      // 框內沒有任何強命中（xRatio>=50%）時，不阻擋擴展，避免首輪無法啟動
+      if (insideStrongBaselines.length === 0) return true;
+
+      const stripLeft = side === 'right' ? x2 : candidateEdge;
+      const stripRight = side === 'right' ? candidateEdge : x1;
+      if (stripRight <= stripLeft) return true;
+
+      const outsideBaselines: number[] = [];
+      for (const t of textItems) {
+        const tRight = t.normX + t.normW;
+        const tIsCJK = hasCJK(t.str);
+        const tBottom = t.normY + t.normH;
+        const tBottomForOverlap = tBottom + t.normH * (tIsCJK ? DESCENDER_RATIO_CJK : DESCENDER_RATIO);
+
+        // 只看與當前 bbox 有垂直交集的文字，排除上下無關區塊
+        const yOverlap = Math.min(tBottomForOverlap, y2) - Math.max(t.normY, y1);
+        if (yOverlap <= 0) continue;
+
+        // 只看「候選擴展帶」上的文字，檢查外部行集合是否為內部行集合子集
+        const xOverlap = Math.min(tRight, stripRight) - Math.max(t.normX, stripLeft);
+        if (xOverlap <= 0) continue;
+
+        outsideBaselines.push(t.normBaseline);
+      }
+
+      if (outsideBaselines.length === 0) return true;
+
+      // outside 的每條 baseline 都要能在 insideStrongBaselines 找到對應（子集關係）
+      return outsideBaselines.every(ob =>
+        insideStrongBaselines.some(ib => Math.abs(ob - ib) <= LINE_SET_MATCH_THRESHOLD)
+      );
+    };
+
     for (const ti of textItems) {
       const tiRight = ti.normX + ti.normW;
       const tiBottom = ti.normY + ti.normH;
@@ -402,21 +519,113 @@ export function snapBboxToText(
       const overlapBottom = Math.min(tiBottomForOverlap, y2);
       const overlapHeight = overlapBottom - overlapTop;
 
-      if (overlapWidth <= 0 || overlapHeight <= 0) continue; // 無交集
+      if (overlapHeight <= 0) continue; // 垂直完全無交集
 
-      // 水平方向：重疊比例 >= 50% 才擴展
+      // === 間隔跨越：同一行文字間的小間隔（如空格、字型切換）不阻斷 X 方向擴張 ===
+      // 條件：(1) 垂直有重疊但水平無交集 (2) 間隔 < 1 字寬(normH) (3) 與框內已有文字同一行
+      if (overlapWidth <= 0) {
+        const gap = Math.max(ti.normX - x2, x1 - tiRight);
+        if (gap > 0 && gap <= ti.normH) {
+          const isSameLine = insideBaselines.some(bl => Math.abs(bl - ti.normBaseline) <= SAME_LINE_THRESHOLD);
+          if (isSameLine) {
+            const isMyText = checkOwnership(bbox, otherBboxes, ti, tiBottomForOverlap, textItems);
+            if (isMyText) {
+              if (ti.normX < x1) {
+                if (hasLineSetSubsetMatch('left', ti.normX)) {
+                  x1 = ti.normX; changed = true;
+                  if (snapDebug) {
+                    x1Trigger = { str: ti.str, normX: ti.normX, normY: ti.normY, normW: ti.normW, normH: ti.normH, xRatio: 0, expanded: 'x1←gap' };
+                  }
+                }
+              }
+              if (tiRight > x2) {
+                if (hasLineSetSubsetMatch('right', tiRight)) {
+                  x2 = tiRight; changed = true;
+                  if (snapDebug) {
+                    x2Trigger = { str: ti.str, normX: ti.normX, normY: ti.normY, normW: ti.normW, normH: ti.normH, xRatio: 0, expanded: 'x2→gap' };
+                  }
+                }
+              }
+            }
+          }
+        }
+        continue;
+      }
+
+      // 水平方向擴展
       const xRatio = ti.normW > 0 ? overlapWidth / ti.normW : 0;
       if (xRatio >= SNAP_OVERLAP_RATIO) {
+        // 正常擴展：重疊比例 >= 50%
+        const isMyText = checkOwnership(bbox, otherBboxes, ti, tiBottomForOverlap, textItems);
+        if (!isMyText) continue;
+
         if (ti.normX < x1) {
-          x1 = ti.normX; changed = true;
-          if (snapDebug) {
-            x1Trigger = { str: ti.str, normX: ti.normX, normY: ti.normY, normW: ti.normW, normH: ti.normH, xRatio: Math.round(xRatio * 100) / 100, expanded: 'x1←' };
+          if (hasLineSetSubsetMatch('left', ti.normX)) {
+            x1 = ti.normX; changed = true;
+            if (snapDebug) {
+              x1Trigger = { str: ti.str, normX: ti.normX, normY: ti.normY, normW: ti.normW, normH: ti.normH, xRatio: Math.round(xRatio * 100) / 100, expanded: 'x1←' };
+            }
           }
         }
         if (tiRight > x2) {
-          x2 = tiRight; changed = true;
-          if (snapDebug) {
-            x2Trigger = { str: ti.str, normX: ti.normX, normY: ti.normY, normW: ti.normW, normH: ti.normH, xRatio: Math.round(xRatio * 100) / 100, expanded: 'x2→' };
+          if (hasLineSetSubsetMatch('right', tiRight)) {
+            x2 = tiRight; changed = true;
+            if (snapDebug) {
+              x2Trigger = { str: ti.str, normX: ti.normX, normY: ti.normY, normW: ti.normW, normH: ti.normH, xRatio: Math.round(xRatio * 100) / 100, expanded: 'x2→' };
+            }
+          }
+        }
+      } else if (overlapWidth <= ti.normH) {
+        // 邊緣微小重疊跨越：xRatio < 50% 但重疊 ≤ 1 字寬，同行時仍擴張
+        const isSameLine = insideBaselines.some(bl => Math.abs(bl - ti.normBaseline) <= SAME_LINE_THRESHOLD);
+        if (isSameLine) {
+          const isMyText = checkOwnership(bbox, otherBboxes, ti, tiBottomForOverlap, textItems);
+          if (isMyText) {
+            if (ti.normX < x1) {
+              if (hasLineSetSubsetMatch('left', ti.normX)) {
+                x1 = ti.normX; changed = true;
+                if (snapDebug) {
+                  x1Trigger = { str: ti.str, normX: ti.normX, normY: ti.normY, normW: ti.normW, normH: ti.normH, xRatio: Math.round(xRatio * 100) / 100, expanded: 'x1←gap' };
+                }
+              }
+            }
+            if (tiRight > x2) {
+              if (hasLineSetSubsetMatch('right', tiRight)) {
+                x2 = tiRight; changed = true;
+                if (snapDebug) {
+                  x2Trigger = { str: ti.str, normX: ti.normX, normY: ti.normY, normW: ti.normW, normH: ti.normH, xRatio: Math.round(xRatio * 100) / 100, expanded: 'x2→gap' };
+                }
+              }
+            }
+          }
+        }
+      } else {
+        // 鄰接跨越：xRatio < 50% 且重疊 > 1 字寬，但與框內某個 hit 相鄰（≤1字寬間距）且同行
+        const isAdjacentToInside = insideEdges.some(edge => {
+          if (Math.abs(ti.normBaseline - edge.baseline) > SAME_LINE_THRESHOLD) return false;
+          const gapR = ti.normX - edge.right;
+          const gapL = edge.left - tiRight;
+          return (gapR >= 0 && gapR <= ti.normH) || (gapL >= 0 && gapL <= ti.normH);
+        });
+        if (isAdjacentToInside) {
+          const isMyText = checkOwnership(bbox, otherBboxes, ti, tiBottomForOverlap, textItems);
+          if (isMyText) {
+            if (ti.normX < x1) {
+              if (hasLineSetSubsetMatch('left', ti.normX)) {
+                x1 = ti.normX; changed = true;
+                if (snapDebug) {
+                  x1Trigger = { str: ti.str, normX: ti.normX, normY: ti.normY, normW: ti.normW, normH: ti.normH, xRatio: Math.round(xRatio * 100) / 100, expanded: 'x1←adj' };
+                }
+              }
+            }
+            if (tiRight > x2) {
+              if (hasLineSetSubsetMatch('right', tiRight)) {
+                x2 = tiRight; changed = true;
+                if (snapDebug) {
+                  x2Trigger = { str: ti.str, normX: ti.normX, normY: ti.normY, normW: ti.normW, normH: ti.normH, xRatio: Math.round(xRatio * 100) / 100, expanded: 'x2→adj' };
+                }
+              }
+            }
           }
         }
       }
@@ -424,9 +633,9 @@ export function snapBboxToText(
       // 垂直方向：只要框碰到該行就補足到視覺文字邊界（任何重疊即擴展）
       // 用 VISUAL_TOP_RATIO / VISUAL_BOTTOM_RATIO 估算實際文字邊界，
       // 避免框擴展到 em square 完整範圍導致上方留白過多
-      // 歸屬判斷：覆蓋量 → 行距歸屬 override → 覆蓋量 fallback
+      // 歸屬判斷：退一半 → 行距歸屬 → 佔比 fallback
       if (overlapHeight > 0) {
-        // 歸屬判斷：退一半覆蓋量 + 行距歸屬
+        // 歸屬判斷：退一半 → 行距歸屬（主要）→ 佔比歸屬（fallback）
         const isMyText = checkOwnership(bbox, otherBboxes, ti, tiBottomForOverlap, textItems);
 
         if (isMyText) {
@@ -449,11 +658,14 @@ export function snapBboxToText(
     }
   }
 
-  // === 退縮：框邊界超出文字範圍時收縮到「屬於自己的」文字的視覺邊界 ===
+  // === 退縮：框邊界超出文字範圍時收縮到「屬於自己的」文字邊界 ===
   // AI 給的框可能比文字範圍大，snap 只擴展不退縮，需要額外收縮到最近文字邊界
   // 佔比歸屬同時控制退縮：不屬於自己的 textItem 不納入邊界計算，確保框不覆蓋鄰框的文字
+  // 退縮同時包含 Y 與 X：Y 用 visualTop/visualBottom，X 用 textItem 實際左右邊界
   let minVisualTop = y2;     // 初始為框底（找最小值）
   let maxVisualBottom = y1;  // 初始為框頂（找最大值）
+  let minTrimX = x2;         // 初始為框右（找最小 X）
+  let maxTrimRight = x1;     // 初始為框左（找最大 right）
   let hasTrimHits = false;
 
   for (const ti of textItems) {
@@ -484,10 +696,14 @@ export function snapBboxToText(
 
     minVisualTop = Math.min(minVisualTop, visualTop);
     maxVisualBottom = Math.max(maxVisualBottom, visualBottom);
+    minTrimX = Math.min(minTrimX, ti.normX);
+    maxTrimRight = Math.max(maxTrimRight, tiRight);
     hasTrimHits = true;
   }
 
   if (hasTrimHits) {
+    if (x1 < minTrimX) x1 = minTrimX;
+    if (x2 > maxTrimRight) x2 = maxTrimRight;
     if (y1 < minVisualTop) y1 = minVisualTop;
     if (y2 > maxVisualBottom) y2 = maxVisualBottom;
   }

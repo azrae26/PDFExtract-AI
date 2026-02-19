@@ -1,7 +1,7 @@
 /**
  * 功能：從 PDF 頁面的文字層中，根據 bounding box 座標提取文字，並自動校正不完整的 bbox
  * 職責：接收 pdfjs PDFPageProxy + Region[]，利用 getTextContent() 取得文字項，
- *       呼叫 pdfTextExtractCore 的純函式完成 snap → resolveXOverlaps → enforce → descender → extract 流程，
+ *       呼叫 pdfTextExtractCore 的純函式完成 containment 去重 → snap → resolveXOverlaps → enforce → descender → extract 流程，
  *       並在各 phase 間快照 bbox 供 debug 診斷
  *       本檔案僅負責 pdfjs 的 IO 層（getTextContent + 座標轉換），所有演算法在 core 中
  * 依賴：pdfjs-dist (PDFPageProxy)、pdfTextExtractCore（純演算法）、types.ts（RegionDebugInfo）
@@ -13,6 +13,7 @@ import {
   NormTextItem,
   NORMALIZED_MAX,
   _ts,
+  findContainedBboxes,
   snapBboxToText,
   resolveXOverlaps,
   enforceMinVerticalGap,
@@ -45,6 +46,17 @@ export async function extractTextForRegions(
   regions: Region[]
 ): Promise<Region[]> {
   if (regions.length === 0) return regions;
+
+  // === Phase 0: 去除被包含的框（面積交集 ≥ 95%）===
+  if (regions.length >= 2) {
+    const containedIndices = findContainedBboxes(regions.map(r => r.bbox));
+    if (containedIndices.size > 0) {
+      const removed = [...containedIndices].map(i => `"${regions[i].label}"`).join(', ');
+      console.log(`[pdfTextExtract][${_ts()}] 🗑️ Phase 0: 移除被包含的框: ${removed}`);
+      regions = regions.filter((_, i) => !containedIndices.has(i));
+      if (regions.length === 0) return regions;
+    }
+  }
 
   const viewport = page.getViewport({ scale: 1 });
   const { width: vw, height: vh } = viewport;
