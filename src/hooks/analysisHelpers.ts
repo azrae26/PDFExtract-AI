@@ -2,7 +2,8 @@
  * 功能：PDF 分析核心純函式工具模組
  * 職責：PDF 頁面渲染、API 呼叫（含失敗自動重試最多 2 次、前端傳入 apiKey）、分析結果合併（回傳空文字 region 清單）、
  *       頁面 canvas 渲染與區域裁切（renderPageCanvas + cropRegionFromCanvas，支援同頁多 region 複用同一 canvas）、
- *       區域截圖裁切、區域識別 API、date/code/report metadata 候選值更新
+ *       區域截圖裁切、區域識別 API、date/code/report metadata 候選值更新、
+ *       畸形 bbox 偵測（isMalformedBbox：座標反轉或極端長形）
  * 依賴：pdfjs、types、constants、pdfTextExtract、brokerUtils、kaiuCmap（亂碼偵測）
  *
  * 重要設計：
@@ -36,9 +37,27 @@ function isGarbledText(str: string): boolean {
   return readable / t.length < 0.35;
 }
 
+/** 判定 bbox 是否為畸形框（座標反轉或極端長形），AI 產出此類框時應退回重跑該頁
+ *  座標格式 [x1, y1, x2, y2]，範圍 0~1000
+ *  isPortrait：直式頁面 true、橫式頁面 false（直式 4%/15%，橫式 3%/20%）*/
+export function isMalformedBbox(bbox: [number, number, number, number], isPortrait: boolean): boolean {
+  const [x1, y1, x2, y2] = bbox;
+  const w = x2 - x1;
+  const h = y2 - y1;
+  // 座標反轉（負寬或負高）
+  if (w <= 0 || h <= 0) return true;
+  // 極端長形：直的頁面 4%/15%，橫的頁面 3%/20%
+  const narrow = isPortrait ? 40 : 30;   // 直 4%, 橫 3%
+  const long = isPortrait ? 150 : 200;  // 直 15%, 橫 20%
+  if ((w < narrow && h > long) || (h < narrow && w > long)) return true;
+  return false;
+}
+
 // === API 失敗重試設定 ===
 export const MAX_RETRIES = 2; // 最多重試 2 次（總共 3 次嘗試）
 export const RETRY_BASE_DELAY_MS = 1500; // 首次重試等待 1.5 秒，之後遞增
+/** 畸形 bbox 導致該頁重跑的最大次數 */
+export const MAX_MALFORMED_RETRIES = 5;
 
 /** 檔案級 regions 更新器：直接寫入 files 陣列（Single Source of Truth） */
 export type FileRegionsUpdater = (

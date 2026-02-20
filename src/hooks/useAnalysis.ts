@@ -28,6 +28,8 @@ import {
   mergePageResult,
   cropRegionToBase64,
   recognizeRegionWithRetry,
+  isMalformedBbox,
+  MAX_MALFORMED_RETRIES,
 } from './analysisHelpers';
 import useRegionRecognize from './useRegionRecognize';
 
@@ -198,6 +200,7 @@ export default function useAnalysis({
       const fileCompletedSet = new Set<string>(); // 避免重複觸發 onFileComplete
       let globalTotal = pagesToRun;
       let globalCompleted = 0;
+      const malformedRetryMap = new Map<string, number>(); // 畸形 bbox 重跑次數 (key: `fileId:pageNum`)
 
       // === 載入第一個檔案 ===
       let firstDoc: pdfjs.PDFDocumentProxy;
@@ -579,6 +582,37 @@ export default function useAnalysis({
         removeAnalyzingPage(fileId, pageNum);
 
         if (!isSessionValid(sessionId)) return;
+
+        // === 畸形 bbox 偵測：座標反轉或極端長形 → 退回重跑（最多 MAX_MALFORMED_RETRIES 次）===
+        if (result && result.regions.length > 0) {
+          const pdfPage = await pdfDoc.getPage(pageNum);
+          const viewport = pdfPage.getViewport({ scale: 1 });
+          const isPortrait = viewport.width < viewport.height;
+          const malformedRegions = result.regions.filter((r: Region) => isMalformedBbox(r.bbox, isPortrait));
+          if (malformedRegions.length > 0) {
+            const retryKey = `${fileId}:${pageNum}`;
+            const retryCount = malformedRetryMap.get(retryKey) || 0;
+            if (retryCount < MAX_MALFORMED_RETRIES) {
+              malformedRetryMap.set(retryKey, retryCount + 1);
+              taskQueue.unshift({ fileId, pageNum });
+              setQueuedPagesMap((prev) => {
+                const nm = new Map(prev);
+                const s = new Set(nm.get(fileId) || []);
+                s.add(pageNum);
+                nm.set(fileId, s);
+                return nm;
+              });
+              const mTs = new Date().toLocaleTimeString('en-US', { hour12: false });
+              console.log(`[useAnalysis][${mTs}] ⚠️ Page ${pageNum} has ${malformedRegions.length} malformed bbox(es) [${malformedRegions.map((r: Region) => `[${r.bbox}]`).join(', ')}], re-queuing (${retryCount + 1}/${MAX_MALFORMED_RETRIES})`);
+              return;
+            }
+            // 達到重跑上限 → 過濾掉畸形 region，保留有效的
+            result.regions = result.regions.filter((r: Region) => !isMalformedBbox(r.bbox, isPortrait));
+            if (result.regions.length === 0) result.hasAnalysis = false;
+            const mTs = new Date().toLocaleTimeString('en-US', { hour12: false });
+            console.log(`[useAnalysis][${mTs}] ⚠️ Page ${pageNum}: ${malformedRegions.length} malformed bbox(es) filtered after ${MAX_MALFORMED_RETRIES} retries`);
+          }
+        }
 
         if (result) {
           const emptyRegions = await mergePageResult(
