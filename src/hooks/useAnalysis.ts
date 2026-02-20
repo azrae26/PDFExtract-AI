@@ -47,6 +47,8 @@ interface UseAnalysisOptions {
   batchSize: number;
   /** Gemini API 金鑰（前端使用者輸入） */
   apiKey: string;
+  /** 按需載入指定檔案的 PDFDocumentProxy（快取 miss 時用）*/
+  loadPdfDoc: (fileId: string) => Promise<pdfjs.PDFDocumentProxy | null>;
 }
 
 export default function useAnalysis({
@@ -60,6 +62,7 @@ export default function useAnalysis({
   model,
   batchSize,
   apiKey,
+  loadPdfDoc,
 }: UseAnalysisOptions) {
   const [batchIsAnalyzing, setBatchIsAnalyzing] = useState(false);
   const [analysisProgress, setAnalysisProgress] = useState({ current: 0, total: 0 });
@@ -760,6 +763,7 @@ export default function useAnalysis({
     async (pageNum: number, targetFileId: string) => {
       if (!targetFileId) return;
 
+
       // 先清除該頁的 ALL regions（先清再跑，包含 userModified）
       updateFileRegions(targetFileId, (prev) => {
         const updated = new Map(prev);
@@ -767,8 +771,18 @@ export default function useAnalysis({
         return updated;
       });
 
-      const pdfDoc = pdfDocRef.current;
-      if (!pdfDoc) return;
+      let pdfDoc = pdfDocRef.current;
+      if (!pdfDoc) {
+        // 快取 miss（通常因驅逐）→ 按需重新載入
+        const loadedDoc = await loadPdfDoc(targetFileId);
+        if (!loadedDoc) {
+          const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
+          console.warn(`[useAnalysis][${ts}] ⚠️ Cannot re-analyze page ${pageNum}: pdfDoc unavailable for ${targetFileId}`);
+          return;
+        }
+        pdfDoc = loadedDoc;
+        pdfDocRef.current = loadedDoc;
+      }
       const sessionId = analysisSessionRef.current; // 用當前 session（不遞增，因為是單頁操作）
 
       // 如果該頁在佇列中，先取消（讓批次迴圈跳過它）
@@ -980,7 +994,7 @@ export default function useAnalysis({
         }
       }
     },
-    [prompt, model, tablePrompt, batchSize, apiKey, pdfDocRef, updateFileRegions, updateFileReport, updateFileMetadata, updateFileProgress, isSessionValid, queuedPagesMap, addAnalyzingPage, removeAnalyzingPage]
+    [prompt, model, tablePrompt, batchSize, apiKey, pdfDocRef, updateFileRegions, updateFileReport, updateFileMetadata, updateFileProgress, isSessionValid, queuedPagesMap, addAnalyzingPage, removeAnalyzingPage, loadPdfDoc]
   );
 
   return {

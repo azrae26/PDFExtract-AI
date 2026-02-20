@@ -23,7 +23,7 @@ import { saveSession, loadSession, savePdfBlob, deletePdfBlob, clearAll as clear
 
 // === PDF 預載 / 快取常數 ===
 const PDF_PRELOAD_WINDOW = 5; // 預載視窗大小（目前 + 後 4 份）
-const PDF_CACHE_MAX = 7;      // 快取超過此數量才開始驅逐
+const PDF_CACHE_MAX = 14;     // 快取超過此數量才開始驅逐
 
 /** 空 Map 常數（避免每次 render 建立新物件導致不必要的 re-render） */
 const EMPTY_MAP = new Map<number, Region[]>();
@@ -439,6 +439,29 @@ export default function useFileManager({
    *  react-pdf 的 <Document> 內部建立的 doc 不在此 set 中，不可由我們 destroy。 */
   const selfLoadedDocIdsRef = useRef<Set<string>>(new Set());
 
+  // === 按需載入 pdfDoc（快取 miss 時用，如驅逐後切換回該檔案）===
+  const loadPdfDocOnDemand = useCallback(async (fileId: string): Promise<pdfjs.PDFDocumentProxy | null> => {
+    // 先檢查快取
+    if (pdfDocCacheRef.current.has(fileId)) {
+      return pdfDocCacheRef.current.get(fileId)!;
+    }
+    // 從 files 找 URL
+    const fileEntry = filesRef.current.find((f) => f.id === fileId);
+    if (!fileEntry) return null;
+    try {
+      const doc = await pdfjs.getDocument(fileEntry.url).promise;
+      // 儲存到快取（標記為 selfLoaded，可安全 destroy）
+      pdfDocCacheRef.current.set(fileId, doc);
+      selfLoadedDocIdsRef.current.add(fileId);
+      const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
+      console.log(`[useFileManager][${ts}] 📂 On-demand loaded PDF for ${fileEntry.name}`);
+      return doc;
+    } catch (e) {
+      console.warn(`[useFileManager] ⚠️ On-demand load failed for ${fileId}:`, e);
+      return null;
+    }
+  }, []);
+
   // === useAnalysis Hook ===
   const {
     isAnalyzing,
@@ -470,6 +493,7 @@ export default function useFileManager({
     model,
     batchSize,
     apiKey,
+    loadPdfDoc: loadPdfDocOnDemand,
   });
   // 橋接 cancelQueuedPage 到 ref（供 updateFileReport 回呼使用）
   cancelQueuedPageRef.current = cancelQueuedPage;
@@ -657,6 +681,16 @@ export default function useFileManager({
       pdfDocRef.current = pdfDocCacheRef.current.get(activeFileId)!;
     } else {
       pdfDocRef.current = null;
+      // 快取 miss（驅逐後切換回該檔案）→ 非同步按需重新載入，讓後續操作可用
+      if (activeFileId) {
+        const snapId = activeFileId;
+        loadPdfDocOnDemand(snapId).then((doc) => {
+          // 仍在同一檔案時才設定（避免切走後污染新檔案的 pdfDocRef）
+          if (doc && activeFileIdRef.current === snapId) {
+            pdfDocRef.current = doc;
+          }
+        });
+      }
     }
 
     prevActiveFileIdRef.current = activeFileId;

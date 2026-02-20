@@ -1,7 +1,8 @@
 /**
  * 功能：中間 PDF 顯示面板（連續頁面模式）
- * 職責：將所有 PDF 頁面依序往下排列顯示、每頁疊加可互動的 bounding boxes、每頁右側顯示分析/排隊/重跑按鈕
- * 依賴：react-pdf、BoundingBox 組件、types.ts
+ * 職責：將所有 PDF 頁面依序往下排列顯示、每頁疊加可互動的 bounding boxes、每頁右側顯示分析/排隊/重跑按鈕、
+ *       右上角保存按鈕（截圖 + Debug JSON 匯出）
+ * 依賴：react-pdf、BoundingBox 組件、types.ts、/api/save-page-export（後端存檔）
  */
 
 'use client';
@@ -11,7 +12,7 @@ import { Document, Page, pdfjs } from 'react-pdf';
 import 'react-pdf/dist/Page/AnnotationLayer.css';
 import BoundingBox from './BoundingBox';
 import { Region } from '@/lib/types';
-import { NORMALIZED_MAX } from '@/lib/constants';
+import { NORMALIZED_MAX, BOX_COLORS } from '@/lib/constants';
 
 // PDF.js worker 由 PDFExtractApp 統一設定，這裡不重複
 
@@ -53,6 +54,8 @@ interface PdfViewerProps {
   showOriginalBbox: boolean;
   /** 切換校正前/校正後 bbox 顯示 */
   onToggleOriginalBbox: () => void;
+  /** 目前顯示的 PDF 檔名（用於匯出時命名） */
+  fileName?: string;
 }
 
 export default function PdfViewer({
@@ -76,6 +79,7 @@ export default function PdfViewer({
   showOriginalBbox,
   onToggleOriginalBbox,
   onBboxClick,
+  fileName,
 }: PdfViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [pageWidth, setPageWidth] = useState(600);
@@ -355,6 +359,20 @@ export default function PdfViewer({
   const pageWidthRef = useRef(pageWidth);
   pageWidthRef.current = pageWidth;
 
+  // === 保存頁面相關 state & refs ===
+  const [savingPages, setSavingPages] = useState(new Set<number>());
+  const [savedPages, setSavedPages] = useState(new Set<number>());
+  /** 防止同頁重複觸發（ref 不觸發 re-render，供 callback 讀取） */
+  const savingInProgressRef = useRef(new Set<number>());
+  const pageDimsRef = useRef(pageDims);
+  pageDimsRef.current = pageDims;
+  const getGlobalColorOffsetRef = useRef(getGlobalColorOffset);
+  getGlobalColorOffsetRef.current = getGlobalColorOffset;
+  const showOriginalBboxRef = useRef(showOriginalBbox);
+  showOriginalBboxRef.current = showOriginalBbox;
+  const fileNameRef = useRef(fileName);
+  fileNameRef.current = fileName;
+
   // 全域快捷鍵（不需焦點，滑鼠指到 PDF 頁面即可）
   useEffect(() => {
     const handleGlobalKeyDown = (e: KeyboardEvent) => {
@@ -434,6 +452,165 @@ export default function PdfViewer({
     document.addEventListener('keydown', handleGlobalKeyDown);
     return () => document.removeEventListener('keydown', handleGlobalKeyDown);
   }, []);
+
+  // === 保存頁面（截圖 + Debug JSON）===
+  const handleSavePage = useCallback(async (pageNum: number) => {
+    if (savingInProgressRef.current.has(pageNum)) return;
+
+    const pageEl = pageElRefs.current.get(pageNum);
+    if (!pageEl) return;
+
+    const pdfCanvas = pageEl.querySelector('canvas') as HTMLCanvasElement | null;
+    if (!pdfCanvas) {
+      alert(`第 ${pageNum} 頁尚未渲染，請先滾動到該頁再儲存`);
+      return;
+    }
+
+    const dim = pageDimsRef.current.get(pageNum);
+    if (!dim || dim.width === 0) return;
+
+    // 開始保存
+    savingInProgressRef.current.add(pageNum);
+    setSavingPages((prev) => { const s = new Set(prev); s.add(pageNum); return s; });
+
+    try {
+      // 1. 取得 PDF 原始資料（供後端提取單頁 PDF 檔）
+      const pdfUrl = pdfUrlRef.current;
+      if (!pdfUrl) throw new Error('PDF URL 不存在');
+      const pdfBlob = await fetch(pdfUrl).then((r) => {
+        if (!r.ok) throw new Error(`PDF 讀取失敗 (${r.status})`);
+        return r.blob();
+      });
+      const pdfBase64 = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const result = reader.result as string;
+          resolve(result.includes(',') ? result.split(',')[1] : result);
+        };
+        reader.onerror = () => reject(new Error('PDF 讀取失敗'));
+        reader.readAsDataURL(pdfBlob);
+      });
+
+      // 2. 含框截圖：在離屏 canvas 上疊加彩色 bbox
+      const offscreen = document.createElement('canvas');
+      offscreen.width = pdfCanvas.width;
+      offscreen.height = pdfCanvas.height;
+      const ctx = offscreen.getContext('2d');
+      if (!ctx) throw new Error('無法建立 canvas context');
+
+      ctx.drawImage(pdfCanvas, 0, 0);
+
+      const scaleX = pdfCanvas.width / dim.width;
+      const scaleY = pdfCanvas.height / dim.height;
+      const regions = pageRegionsRef.current.get(pageNum) ?? [];
+      const colorOffset = getGlobalColorOffsetRef.current(pageNum);
+      const useOriginal = showOriginalBboxRef.current;
+
+      regions.forEach((region, idx) => {
+        const color = BOX_COLORS[(colorOffset + idx) % BOX_COLORS.length]; // 與畫面顯示顏色一致
+        const bboxToUse = (useOriginal && region.originalBbox) ? region.originalBbox : region.bbox;
+        const [x1, y1, x2, y2] = bboxToUse;
+        if (x1 >= x2 || y1 >= y2) return; // 跳過無效 bbox（如 resolveX bug）
+
+        const px = (x1 / NORMALIZED_MAX) * dim.width * scaleX;
+        const py = (y1 / NORMALIZED_MAX) * dim.height * scaleY;
+        const pw = ((x2 - x1) / NORMALIZED_MAX) * dim.width * scaleX;
+        const ph = ((y2 - y1) / NORMALIZED_MAX) * dim.height * scaleY;
+
+        // 半透明填充
+        ctx.globalAlpha = 0.22;
+        ctx.fillStyle = color.border;
+        ctx.fillRect(px, py, pw, ph);
+
+        // 邊框
+        ctx.globalAlpha = 1.0;
+        ctx.strokeStyle = color.border;
+        ctx.lineWidth = 2.5 * ((scaleX + scaleY) / 2);
+        ctx.strokeRect(px, py, pw, ph);
+
+        // 標籤（region 索引 + label）
+        const label = region.label ? `${idx + 1}. ${region.label}` : `${idx + 1}`;
+        const fontSize = Math.max(11, 13 * scaleX);
+        ctx.font = `bold ${fontSize}px sans-serif`;
+        const labelY = py - 4 * scaleY;
+        ctx.fillStyle = 'rgba(0,0,0,0.65)';
+        const tw = ctx.measureText(label).width;
+        ctx.fillRect(px, labelY - fontSize, tw + 6 * scaleX, fontSize + 4 * scaleY);
+        ctx.fillStyle = '#ffffff';
+        ctx.fillText(label, px + 3 * scaleX, labelY - 1 * scaleY);
+      });
+
+      const boxesJpgData = offscreen.toDataURL('image/jpeg', 0.92);
+
+      // 3. Debug JSON（與 debug-pdf.ts 輸出格式一致，可直接貼入 test-cases.json）
+      const ts = new Date().toISOString();
+      const debugInfo = {
+        capturedAt: ts,
+        fileName: fileNameRef.current ?? 'unknown',
+        page: pageNum,
+        totalRegions: regions.length,
+        regions: regions.map((r, idx) => {
+          const bboxForPixel = r.bbox; // 永遠用最終 bbox 計算 pixel 座標
+          return {
+            page: pageNum,
+            regionId: r.id,
+            label: r.label,
+            bbox: r.bbox,
+            bboxSize: {
+              w: r.bbox[2] - r.bbox[0],
+              h: r.bbox[3] - r.bbox[1],
+            },
+            pixelBbox: {
+              x: Math.round((bboxForPixel[0] / NORMALIZED_MAX) * dim.width),
+              y: Math.round((bboxForPixel[1] / NORMALIZED_MAX) * dim.height),
+              w: Math.round(((bboxForPixel[2] - bboxForPixel[0]) / NORMALIZED_MAX) * dim.width),
+              h: Math.round(((bboxForPixel[3] - bboxForPixel[1]) / NORMALIZED_MAX) * dim.height),
+            },
+            displaySize: { w: dim.width, h: dim.height },
+            ...(r.userModified ? { userModified: true } : {}),
+            hitsCount: r._debug?.hits?.length ?? 0,
+            hitsDetail: (r._debug?.hits ?? []).map((h, i) => ({ i, str: h.str })),
+            extractionDebug: r._debug ?? null,
+            text: r.text,
+          };
+        }),
+      };
+
+      // 4. POST 到 API 存檔
+      const res = await fetch('/api/save-page-export', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          fileName: fileNameRef.current ?? 'unknown',
+          page: pageNum,
+          pdfBase64,
+          jpgWithBoxesBase64: boxesJpgData.replace(/^data:image\/jpeg;base64,/, ''),
+          debugJson: debugInfo,
+        }),
+      });
+
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const result = await res.json();
+      if (!result.success) throw new Error(result.error || '儲存失敗');
+
+      const ts2 = new Date().toLocaleTimeString('en-US', { hour12: false });
+      console.log(`[PdfViewer][${ts2}] 💾 第 ${pageNum} 頁已儲存 → ${result.savedTo}`);
+
+      // 短暫顯示成功狀態
+      setSavedPages((prev) => { const s = new Set(prev); s.add(pageNum); return s; });
+      setTimeout(() => {
+        setSavedPages((prev) => { const s = new Set(prev); s.delete(pageNum); return s; });
+      }, 2500);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
+      console.error(`[PdfViewer][${ts}] ❌ 儲存失敗:`, msg);
+      alert(`第 ${pageNum} 頁儲存失敗：${msg}`);
+    } finally {
+      savingInProgressRef.current.delete(pageNum);
+      setSavingPages((prev) => { const s = new Set(prev); s.delete(pageNum); return s; });
+    }
+  }, []); // 所有外部依賴均透過 ref 讀取，無需列入 deps
 
   // 計算可視區域上方/下方的 region 數量
   const updateAboveBelowCounts = useCallback(() => {
@@ -575,6 +752,36 @@ export default function PdfViewer({
                   <div className="absolute -top-0 left-0 bg-gray-700/70 text-white text-xs px-2 py-0.5 rounded-br z-10">
                     {pageNum} / {numPages}
                   </div>
+
+                  {/* 保存按鈕（右上角）— 儲存截圖 + Debug JSON */}
+                  <button
+                    onClick={() => handleSavePage(pageNum)}
+                    disabled={savingPages.has(pageNum)}
+                    className={`absolute top-0 right-0 flex items-center gap-1 px-1.5 py-0.5 rounded-bl z-10 text-xs font-medium transition-all duration-200 select-none ${
+                      savingPages.has(pageNum)
+                        ? 'bg-blue-500/80 text-white cursor-wait'
+                        : savedPages.has(pageNum)
+                          ? 'bg-green-600/80 text-white'
+                          : 'bg-gray-700/70 text-white hover:bg-indigo-600/80 cursor-pointer'
+                    }`}
+                    title="儲存此頁（PDF截圖 / 含框截圖 / Debug JSON）"
+                  >
+                    {savingPages.has(pageNum) ? (
+                      <svg className="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                      </svg>
+                    ) : savedPages.has(pageNum) ? (
+                      <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                      </svg>
+                    ) : (
+                      <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                      </svg>
+                    )}
+                    <span>{savedPages.has(pageNum) ? '已儲存' : '儲存'}</span>
+                  </button>
 
                   {/* 右側按鈕群 — JS 動態 clamp 到視口內（預設 25%） */}
                   <div
@@ -780,6 +987,8 @@ export default function PdfViewer({
           <div>S 或 W：上一頁</div>
           <div>Ctrl×2：重跑該頁</div>
           <div>Alt×2：刪除該頁框</div>
+          <div className="mt-1.5 pt-1.5 border-t border-gray-600">E：上一個檔案</div>
+          <div>D：下一個檔案</div>
         </div>
       </div>
     </div>

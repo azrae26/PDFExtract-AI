@@ -134,6 +134,8 @@ export const COLUMN_STRICT_MIN_WIDTH = 10;
 export const COLUMN_MIN_WIDTH_RATIO = 0.10;
 /** 行被分界線穿過時，行內 gap 至少要有此寬度才允許切分（歸一化單位） */
 export const COLUMN_CUT_GAP_MIN = 5;
+/** strict fallback 的切割行 gap 門檻（比一般更嚴格）：約 3mm，排除字間空白（9-15 units）被誤判為欄分界 */
+export const COLUMN_CUT_GAP_MIN_STRICT = 15;
 /** 不合理切割行佔比上限——超過此比例的行在分界線位置沒有足夠 gap → 拒絕該候選 */
 export const COLUMN_BAD_CUT_MAX_RATIO = 0.2;
 /** 文字內容比例下限——較少一邊的字元數 / 總字元數 < 此值 → 不是真正的多欄（避免把 bullet list 的 • 誤判為左欄） */
@@ -376,9 +378,12 @@ function checkOwnership(
     const pairOverlapTop = Math.max(myBbox[1], other[1]);
     const pairOverlapBottom = Math.min(myBbox[3], other[3]);
 
-    // 無重疊守衛：兩框垂直完全不重疊，且文字不在 other 框內 → 無實際爭搶，跳過
+    // 無重疊守衛：兩框垂直完全不重疊，且文字與 other 框無任何 Y 方向幾何交集 → 無實際爭搶，跳過
     // 解決框間 gap 中的文字因 lineSpacingOwnership 被誤判給碰不到的框的問題
-    if (pairOverlapBottom <= pairOverlapTop && !tiInOther) continue;
+    // 注意：必須用幾何交集（normY < other.y2 && tiBottom > other.y1）而非 tiInOther（完全在框內），
+    // 否則跨越兩框邊界的文字（top 在 A 框、baseline 在 B 框）會被誤判為「不在 other」而跳過歸屬
+    const tiOverlapsOtherY = ti.normY < other[3] && tiBottomForOverlap > other[1];
+    if (pairOverlapBottom <= pairOverlapTop && !tiOverlapsOtherY) continue;
 
     let myEffY1 = myBbox[1], myEffY2 = myBbox[3];
     let otherEffY1 = other[1], otherEffY2 = other[3];
@@ -490,6 +495,12 @@ export function snapBboxToText(
         const xOverlap = Math.min(tRight, stripRight) - Math.max(t.normX, stripLeft);
         if (xOverlap <= 0) continue;
 
+        // 跨越邊界延伸進 bbox 的 text items 不計入 outsideBaselines：
+        // 它們已部分在 bbox 內，不是純粹的「外部」文字（如換行短尾段「雲服。」）
+        // 只有完全在擴展帶內的 text items 才是真正的外部文字，需要子集檢查
+        if (side === 'left' && tRight > stripRight) continue;
+        if (side === 'right' && t.normX < stripLeft) continue;
+
         outsideBaselines.push(t.normBaseline);
       }
 
@@ -525,7 +536,7 @@ export function snapBboxToText(
       // 條件：(1) 垂直有重疊但水平無交集 (2) 間隔 < 1 字寬(normH) (3) 與框內已有文字同一行
       if (overlapWidth <= 0) {
         const gap = Math.max(ti.normX - x2, x1 - tiRight);
-        if (gap > 0 && gap <= ti.normH) {
+        if (gap >= 0 && gap <= ti.normH) {
           const isSameLine = insideBaselines.some(bl => Math.abs(bl - ti.normBaseline) <= SAME_LINE_THRESHOLD);
           if (isSameLine) {
             const isMyText = checkOwnership(bbox, otherBboxes, ti, tiBottomForOverlap, textItems);
@@ -661,12 +672,14 @@ export function snapBboxToText(
   // === 退縮：框邊界超出文字範圍時收縮到「屬於自己的」文字邊界 ===
   // AI 給的框可能比文字範圍大，snap 只擴展不退縮，需要額外收縮到最近文字邊界
   // 佔比歸屬同時控制退縮：不屬於自己的 textItem 不納入邊界計算，確保框不覆蓋鄰框的文字
-  // 退縮同時包含 Y 與 X：Y 用 visualTop/visualBottom，X 用 textItem 實際左右邊界
+  // X 退縮需 xRatio ≥ 50%（避免隔壁欄文字干擾左右邊界）
+  // Y 退縮不需 xRatio 門檻（換行短尾段可能只有幾個字，xRatio 極低但確實是框內接續文字）
   let minVisualTop = y2;     // 初始為框底（找最小值）
   let maxVisualBottom = y1;  // 初始為框頂（找最大值）
   let minTrimX = x2;         // 初始為框右（找最小 X）
   let maxTrimRight = x1;     // 初始為框左（找最大 right）
-  let hasTrimHits = false;
+  let hasXTrimHits = false;
+  let hasYTrimHits = false;
 
   for (const ti of textItems) {
     const tiRight = ti.normX + ti.normW;
@@ -684,26 +697,31 @@ export function snapBboxToText(
 
     if (overlapWidth <= 0 || overlapHeight <= 0) continue;
 
-    // 水平重疊比例門檻（和擴展一致）
-    const xRatio = ti.normW > 0 ? overlapWidth / ti.normW : 0;
-    if (xRatio < SNAP_OVERLAP_RATIO) continue;
-
     // 歸屬判斷：只有屬於自己的 textItem 才納入退縮邊界計算
     if (!checkOwnership(bbox, otherBboxes, ti, tiBottomForOverlap, textItems)) continue;
 
     const visualTop = ti.normY + ti.normH * (tiIsCJK ? VISUAL_TOP_RATIO_CJK : VISUAL_TOP_RATIO);
     const visualBottom = tiBottom + ti.normH * VISUAL_BOTTOM_RATIO;
 
+    // Y 退縮：任何有重疊的文字都計入（不需 xRatio 門檻）
     minVisualTop = Math.min(minVisualTop, visualTop);
     maxVisualBottom = Math.max(maxVisualBottom, visualBottom);
-    minTrimX = Math.min(minTrimX, ti.normX);
-    maxTrimRight = Math.max(maxTrimRight, tiRight);
-    hasTrimHits = true;
+    hasYTrimHits = true;
+
+    // X 退縮：需 xRatio ≥ 50%（避免隔壁欄文字拉偏左右邊界）
+    const xRatio = ti.normW > 0 ? overlapWidth / ti.normW : 0;
+    if (xRatio >= SNAP_OVERLAP_RATIO) {
+      minTrimX = Math.min(minTrimX, ti.normX);
+      maxTrimRight = Math.max(maxTrimRight, tiRight);
+      hasXTrimHits = true;
+    }
   }
 
-  if (hasTrimHits) {
+  if (hasXTrimHits) {
     if (x1 < minTrimX) x1 = minTrimX;
     if (x2 > maxTrimRight) x2 = maxTrimRight;
+  }
+  if (hasYTrimHits) {
     if (y1 < minVisualTop) y1 = minVisualTop;
     if (y2 > maxVisualBottom) y2 = maxVisualBottom;
   }
@@ -897,9 +915,11 @@ export function resolveXOverlaps(
         }
       }
 
-      // 兩邊 baselines 都是空的 → X 非重疊區沒有文字
-      // → 兩框是上下堆疊（X 完全重疊）而非左右並排，交由 enforce 處理 Y 重疊
-      if (leftBaselines.size === 0 && rightBaselines.size === 0) continue;
+      // 任一邊 baselines 為空 → 該側在 X 非重疊區沒有自己獨有的文字
+      // 真正的左右並排框兩側都應有獨有 baseline；若任一側為空，表示兩框是上下堆疊
+      // （如全寬框 x2 = xOverlapRight → 幾何上不可能有 rightBaselines）
+      // → 交由 enforce 處理 Y 重疊，不做 X 分離（否則會把 x1 推到對方 x2 造成 bbox 無效）
+      if (leftBaselines.size === 0 || rightBaselines.size === 0) continue;
 
       // --- Step 2: 計算 baseline 子集比例 ---
       // 用較少那邊當分母，看它的 baselines 是否都在較多那邊找得到
@@ -1116,6 +1136,7 @@ export function countLines(hits: Hit[]): number {
 export function testSeparator(
   hits: Hit[],
   separator: number,
+  cutGapMin: number = COLUMN_CUT_GAP_MIN,
 ): { leftHits: Hit[]; rightHits: Hit[]; exclusiveRatio: number; detail: string } | null {
   const leftHits: Hit[] = [];
   const rightHits: Hit[] = [];
@@ -1178,7 +1199,7 @@ export function testSeparator(
     for (let j = 1; j < sortedLine.length; j++) {
       const gapLeft = sortedLine[j - 1].normRight;
       const gapRight = sortedLine[j].normX;
-      if (gapLeft <= separator && gapRight >= separator && (gapRight - gapLeft) > COLUMN_CUT_GAP_MIN) {
+      if (gapLeft <= separator && gapRight >= separator && (gapRight - gapLeft) > cutGapMin) {
         hasGap = true;
         break;
       }
@@ -1436,8 +1457,8 @@ export function splitIntoColumns(hits: Hit[], debug?: ExtractDebugCollector): Hi
     const best = lowBands[0];
     const strictThreshold = Math.max(1, Math.ceil(totalLines * COLUMN_STRICT_COVERAGE_RATIO));
     if (best.minCov < strictThreshold && (best.endX - best.startX) >= COLUMN_STRICT_MIN_WIDTH) {
-      // 用這個 lowBand 覆蓋最低桶的位置重新分
-      const fallbackResult = testSeparator(hits, best.minCovCenterX);
+      // 用這個 lowBand 覆蓋最低桶的位置重新分；strict fallback 用更嚴格的 gap 門檻，避免字間空白被誤判為欄分界
+      const fallbackResult = testSeparator(hits, best.minCovCenterX, COLUMN_CUT_GAP_MIN_STRICT);
       if (fallbackResult) {
         console.log(
           `[pdfTextExtract][${_ts()}] 📊 偵測到 2 欄佈局（投影法 strict fallback）：${fallbackResult.detail}`

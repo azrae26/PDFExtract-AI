@@ -277,6 +277,35 @@ export default function PDFExtractApp() {
     setCurrentPage(1);
   }, [setActiveFileId]);
 
+  // === E / D 全域快捷鍵：上一個 / 下一個檔案（輸入狀態時不觸發）===
+  useEffect(() => {
+    const handleFileSwitchKeyDown = (e: KeyboardEvent) => {
+      const el = e.target as HTMLElement;
+      const tag = el?.tagName?.toUpperCase();
+      const isInput = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || (el?.isContentEditable ?? false);
+      if (isInput) return;
+      if (e.key !== 'e' && e.key !== 'E' && e.key !== 'd' && e.key !== 'D') return;
+
+      const currentFiles = filesRef.current;
+      if (currentFiles.length === 0) return;
+      const currentIdx = currentFiles.findIndex((f) => f.id === activeFileIdRef.current);
+      if (currentIdx < 0) return;
+
+      let nextIdx: number;
+      if (e.key === 'e' || e.key === 'E') {
+        nextIdx = Math.max(0, currentIdx - 1);
+      } else {
+        nextIdx = Math.min(currentFiles.length - 1, currentIdx + 1);
+      }
+      if (nextIdx === currentIdx) return;
+
+      e.preventDefault();
+      handleSelectFile(currentFiles[nextIdx].id);
+    };
+    document.addEventListener('keydown', handleFileSwitchKeyDown);
+    return () => document.removeEventListener('keydown', handleFileSwitchKeyDown);
+  }, [handleSelectFile]);
+
   // === 更新單一區域的 bbox（拖動/resize 後）→ 標記 userModified + 自動重新提取文字 ===
   const handleRegionUpdate = useCallback(
     async (page: number, regionId: number, newBbox: [number, number, number, number]) => {
@@ -772,6 +801,7 @@ export default function PDFExtractApp() {
                     handleRegionDoubleClick(page, region, file.id);
                   }
                 }}
+                fileName={file.name}
               />
             </div>
           );
