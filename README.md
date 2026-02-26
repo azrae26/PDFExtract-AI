@@ -152,6 +152,16 @@ npx tsx debug-pdf.ts batch [dir] [page]
 2. 設定環境變數 `SETTINGS_DIR=/data`
 3. 設定環境變數 `SETTINGS_PASSWORD=你的密碼`
 
+**設定 SETTINGS_PASSWORD（三種方式）**：
+
+| 方式 | 步驟 |
+|------|------|
+| **A. Railway Dashboard** | 開啟專案 → 選 Service → **Variables** 分頁 → **New Variable** → 名稱 `SETTINGS_PASSWORD`、值填你的密碼 → 儲存（會觸發重新部署） |
+| **B. Railway CLI** | `railway login` 登入後，在專案目錄執行 `railway link` 綁定，接著：<br>`railway variable set "SETTINGS_PASSWORD=你的密碼"` |
+| **C. 輔助腳本** | `cd pdfextract-ai; .\scripts\railway-set-settings-password.ps1 -Password "你的密碼"`（需先 `npm i -g @railway/cli`） |
+
+直接連結：[Railway 此 Service 設定頁](https://railway.com/project/f85aaea4-bf36-4189-92c6-f2007f31af38/service/2b89e95a-2386-4a18-a339-dba35dd08efb/settings)
+
 ## 注意事項
 
 - API Key 不要提交到版本控制（`.env.local` 已在 `.gitignore` 中）

@@ -42,3 +42,13 @@ next-env.d.ts
 
 # PDF sample files (keep debug scripts)
 pdf/*.pdf
+
+# 使用者本機設定（prompt、apiKey 等）
+data/settings.json
+
+# 匯出輸出資料夾
+exports/
+
+# PDF 字型資源（cmap、標準字型，體積大且可於執行時下載）
+public/cmaps/
+public/standard_fonts/

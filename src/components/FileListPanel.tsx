@@ -28,10 +28,13 @@ interface FileListPanelProps {
 
 /** 計算單檔實際要分析的頁數（numPages - effectiveSkip） */
 function getPagesToAnalyze(entry: FileEntry, brokerSkipMap: Record<string, number>, skipLastPages: number): number {
-  const broker = entry.selectedBroker || entry.report;
-  const effectiveSkip = (broker && brokerSkipMap[broker] !== undefined)
-    ? brokerSkipMap[broker]
-    : skipLastPages;
+  // 優先用 report（原始名如「凱基(一般報告)」）查 skipMap，找不到才用 selectedBroker（canonical 名），
+  // 與 useFileManager.lookupBrokerSkip 邏輯一致
+  const skipFromReport = entry.report && brokerSkipMap[entry.report] !== undefined
+    ? brokerSkipMap[entry.report] : undefined;
+  const skipFromBroker = entry.selectedBroker && brokerSkipMap[entry.selectedBroker] !== undefined
+    ? brokerSkipMap[entry.selectedBroker] : undefined;
+  const effectiveSkip = skipFromReport ?? skipFromBroker ?? skipLastPages;
   return Math.max(1, entry.numPages - effectiveSkip);
 }
 

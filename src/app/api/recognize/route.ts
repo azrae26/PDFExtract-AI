@@ -8,14 +8,10 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { NextRequest, NextResponse } from 'next/server';
 
-/** 模型 429 配額耗盡時的自動退回映射 */
-const MODEL_FALLBACK: Record<string, string> = {
-  'gemini-3-pro-preview': 'gemini-3-flash-preview',
-};
-
-/** 強制 thinking mode 的模型（無法設 thinkingBudget: 0）— 2.5 Pro 最低 128，3 Pro 僅支援 thinking */
+/** 強制 thinking mode 的模型（無法設 thinkingBudget: 0）— 2.5 Pro 最低 128，3 Pro / 3.1 Pro 僅支援 thinking */
 const MODELS_REQUIRE_THINKING = new Set([
   'gemini-3-pro-preview',
+  'gemini-3.1-pro-preview',
   'gemini-2.5-pro',
   'gemini-2.5-pro-preview',
 ]);
@@ -73,7 +69,6 @@ export async function POST(request: NextRequest): Promise<NextResponse<Recognize
       },
     ];
 
-    let actualModel = selectedModel;
     let result;
 
     try {
@@ -84,23 +79,15 @@ export async function POST(request: NextRequest): Promise<NextResponse<Recognize
       result = await modelObj.generateContent(contentParts);
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
-      const fallback = MODEL_FALLBACK[selectedModel];
-      if (fallback && errMsg.includes('429')) {
+      if (errMsg.includes('429')) {
         const ts2 = new Date().toLocaleTimeString('en-US', { hour12: false });
-        console.log(`[RecognizeRoute][${ts2}] ⚠️ ${selectedModel} quota exceeded, falling back to ${fallback}...`);
-        actualModel = fallback;
-        const fallbackObj = genAI.getGenerativeModel({
-          model: fallback,
-          generationConfig: getThinkingConfigMinimal(fallback),
-        });
-        result = await fallbackObj.generateContent(contentParts);
-      } else {
-        throw err;
+        console.log(`[RecognizeRoute][${ts2}] ⚠️ ${selectedModel} rate limited (429)`);
+        return NextResponse.json(
+          { success: false, error: 'Rate limit exceeded', rateLimited: true },
+          { status: 429 }
+        );
       }
-    }
-
-    if (actualModel !== selectedModel) {
-      console.log(`[RecognizeRoute][${timestamp}] 🔄 Used fallback model: ${actualModel} (requested: ${selectedModel})`);
+      throw err;
     }
 
     let text = result.response.text().trim();

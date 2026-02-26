@@ -18,6 +18,7 @@ export const GEMINI_MODELS = [
   { id: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash', desc: '高性價比，帶思考能力' },
   { id: 'gemini-3-flash-preview', label: 'Gemini 3 Flash', desc: '最新一代，速度與品質平衡' },
   { id: 'gemini-3-pro-preview', label: 'Gemini 3 Pro', desc: '最強推理能力，旗艦模型' },
+  { id: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro', desc: '進階推理與代理能力，優化版' },
 ] as const;
 
 export const DEFAULT_MODEL = 'gemini-3-flash-preview';

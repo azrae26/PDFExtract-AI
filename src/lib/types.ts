@@ -161,6 +161,8 @@ export interface AnalyzeResponse {
   success: boolean;
   data?: PageAnalysis;
   error?: string;
+  /** 429 速率限制標記：前端據此決定延遲重試或退回模型 */
+  rateLimited?: boolean;
 }
 
 /** 多檔案管理：單一檔案條目 */

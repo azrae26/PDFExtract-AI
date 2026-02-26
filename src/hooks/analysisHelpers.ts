@@ -1,6 +1,6 @@
 /**
  * 功能：PDF 分析核心純函式工具模組
- * 職責：PDF 頁面渲染、API 呼叫（含失敗自動重試最多 2 次、前端傳入 apiKey）、分析結果合併（回傳空文字 region 清單）、
+ * 職責：PDF 頁面渲染、API 呼叫（含失敗自動重試最多 2 次、429 速率限制等 10s 重試 + 連 2 次退回 Flash、前端傳入 apiKey）、分析結果合併（回傳空文字 region 清單）、
  *       頁面 canvas 渲染與區域裁切（renderPageCanvas + cropRegionFromCanvas，支援同頁多 region 複用同一 canvas）、
  *       區域截圖裁切、區域識別 API、date/code/report metadata 候選值更新、
  *       畸形 bbox 偵測（isMalformedBbox：座標反轉或極端長形）
@@ -58,6 +58,29 @@ export const MAX_RETRIES = 2; // 最多重試 2 次（總共 3 次嘗試）
 export const RETRY_BASE_DELAY_MS = 1500; // 首次重試等待 1.5 秒，之後遞增
 /** 畸形 bbox 導致該頁重跑的最大次數 */
 export const MAX_MALFORMED_RETRIES = 5;
+/** 429 速率限制等待時間（毫秒） */
+export const RATE_LIMIT_DELAY_MS = 10_000;
+/** 429 連續命中次數上限（安全閥），超過即放棄 */
+export const MAX_RATE_LIMIT_RETRIES = 4;
+/** 429 連續 2 次後退回的模型 */
+export const RATE_LIMIT_FALLBACK_MODEL = 'gemini-3-flash-preview';
+
+// === 全域 429 速率限制暫停（模組級 singleton，所有 worker 共享）===
+// 任一 worker 遇到 429 → 設定暫停時間戳 → 其他 worker 在下一次 API 呼叫前等待
+let _rateLimitResumeAt = 0;
+/** 設定全域 429 暫停（所有 worker 在此時間之前不送出新 API 呼叫） */
+function setGlobalRateLimitPause() {
+  _rateLimitResumeAt = Date.now() + RATE_LIMIT_DELAY_MS;
+}
+/** 等待全域 429 暫停結束（若無暫停或已過期則立即返回） */
+async function waitForGlobalRateLimit() {
+  const remaining = _rateLimitResumeAt - Date.now();
+  if (remaining > 0) {
+    const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
+    console.log(`[analysisHelpers][${ts}] ⏸️ Global rate limit pause: waiting ${Math.ceil(remaining / 1000)}s...`);
+    await new Promise((r) => setTimeout(r, remaining));
+  }
+}
 
 /** 檔案級 regions 更新器：直接寫入 files 陣列（Single Source of Truth） */
 export type FileRegionsUpdater = (
@@ -143,7 +166,8 @@ export async function renderPageToImage(
   }
 }
 
-// === 分析單頁（含失敗自動重試最多 2 次）===
+// === 分析單頁（含失敗自動重試 + 429 速率限制特殊處理）===
+// 429 處理：等 10 秒重試同模型；連續 2 次 429 → 該頁退回 RATE_LIMIT_FALLBACK_MODEL，其他頁不影響
 export async function analyzePageWithRetry(
   pageNum: number,
   promptText: string,
@@ -154,18 +178,26 @@ export async function analyzePageWithRetry(
   apiKey?: string,
 ) {
   const imageBase64 = await renderPageToImage(pageNum, pdfDoc, sessionId, isSessionValid);
-  if (!imageBase64) return null; // rendering 被取消或 session 失效
+  if (!imageBase64) return null;
 
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+  let currentModel = modelId;
+  let rateLimitHits = 0;
+  let errorRetries = 0;
+
+  while (true) {
+    if (!isSessionValid(sessionId)) return null;
+
+    // 全域 429 暫停：任一 worker 觸發後，所有 worker 送出前都會等
+    await waitForGlobalRateLimit();
     if (!isSessionValid(sessionId)) return null;
 
     const timestamp = new Date().toLocaleTimeString('en-US', { hour12: false });
 
     try {
-      if (attempt > 0) {
-        console.log(`[analysisHelpers][${timestamp}] 🔄 Page ${pageNum} retry ${attempt}/${MAX_RETRIES}...`);
+      if (errorRetries > 0 || rateLimitHits > 0) {
+        console.log(`[analysisHelpers][${timestamp}] 🔄 Page ${pageNum} retry (errors: ${errorRetries}, 429s: ${rateLimitHits}, model: ${currentModel})...`);
       } else {
-        console.log(`[analysisHelpers][${timestamp}] 📤 Sending page ${pageNum} to API (model: ${modelId})...`);
+        console.log(`[analysisHelpers][${timestamp}] 📤 Sending page ${pageNum} to API (model: ${currentModel})...`);
       }
 
       const response = await fetch('/api/analyze', {
@@ -175,7 +207,7 @@ export async function analyzePageWithRetry(
           image: imageBase64,
           prompt: promptText,
           page: pageNum,
-          model: modelId,
+          model: currentModel,
           ...(apiKey ? { apiKey } : {}),
         }),
       });
@@ -183,38 +215,49 @@ export async function analyzePageWithRetry(
       const result = await response.json();
 
       if (result.success) {
-        console.log(
-          `[analysisHelpers][${timestamp}] ✅ Page ${pageNum}: ${result.data.regions.length} regions found`
-        );
+        if (currentModel !== modelId) {
+          console.log(`[analysisHelpers][${timestamp}] ✅ Page ${pageNum}: ${result.data.regions.length} regions found (fallback: ${currentModel})`);
+        } else {
+          console.log(`[analysisHelpers][${timestamp}] ✅ Page ${pageNum}: ${result.data.regions.length} regions found`);
+        }
         return result.data;
       }
 
-      console.error(`[analysisHelpers][${timestamp}] ❌ Page ${pageNum} failed (attempt ${attempt + 1}/${MAX_RETRIES + 1}):`, result.error);
-
-      if (attempt < MAX_RETRIES) {
-        const delay = RETRY_BASE_DELAY_MS * (attempt + 1);
-        console.log(`[analysisHelpers][${timestamp}] ⏳ Waiting ${delay}ms before retry...`);
-        await new Promise((r) => setTimeout(r, delay));
-        continue;
+      // 429 速率限制：設定全域暫停 + per-page 計數決定是否退回模型
+      if (result.rateLimited) {
+        rateLimitHits++;
+        setGlobalRateLimitPause();
+        if (rateLimitHits >= 2 && currentModel !== RATE_LIMIT_FALLBACK_MODEL) {
+          console.log(`[analysisHelpers][${timestamp}] 🔀 Page ${pageNum}: 連續 ${rateLimitHits} 次 429，退回 ${RATE_LIMIT_FALLBACK_MODEL}`);
+          currentModel = RATE_LIMIT_FALLBACK_MODEL;
+        }
+        if (rateLimitHits > MAX_RATE_LIMIT_RETRIES) {
+          console.error(`[analysisHelpers][${timestamp}] ❌ Page ${pageNum}: 429 超過 ${MAX_RATE_LIMIT_RETRIES} 次，放棄`);
+          return null;
+        }
+        console.log(`[analysisHelpers][${timestamp}] ⏳ Page ${pageNum}: 429 速率限制，全域暫停 ${RATE_LIMIT_DELAY_MS / 1000}s`);
+        continue; // 下一輪迴圈開頭的 waitForGlobalRateLimit() 會等
       }
 
-      return null;
+      // 一般錯誤
+      errorRetries++;
+      console.error(`[analysisHelpers][${timestamp}] ❌ Page ${pageNum} failed (error ${errorRetries}/${MAX_RETRIES + 1}):`, result.error);
+      if (errorRetries > MAX_RETRIES) return null;
+
+      const delay = RETRY_BASE_DELAY_MS * errorRetries;
+      console.log(`[analysisHelpers][${timestamp}] ⏳ Waiting ${delay}ms before retry...`);
+      await new Promise((r) => setTimeout(r, delay));
     } catch (err) {
+      errorRetries++;
       const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
-      console.error(`[analysisHelpers][${ts}] ❌ Error analyzing page ${pageNum} (attempt ${attempt + 1}/${MAX_RETRIES + 1}):`, err);
+      console.error(`[analysisHelpers][${ts}] ❌ Error analyzing page ${pageNum} (error ${errorRetries}/${MAX_RETRIES + 1}):`, err);
+      if (errorRetries > MAX_RETRIES) return null;
 
-      if (attempt < MAX_RETRIES) {
-        const delay = RETRY_BASE_DELAY_MS * (attempt + 1);
-        console.log(`[analysisHelpers][${ts}] ⏳ Waiting ${delay}ms before retry...`);
-        await new Promise((r) => setTimeout(r, delay));
-        continue;
-      }
-
-      return null;
+      const delay = RETRY_BASE_DELAY_MS * errorRetries;
+      console.log(`[analysisHelpers][${ts}] ⏳ Waiting ${delay}ms before retry...`);
+      await new Promise((r) => setTimeout(r, delay));
     }
   }
-
-  return null;
 }
 
 /** 處理單頁分析結果：提取文字 + merge 到 pageRegions + 儲存券商名
@@ -399,7 +442,8 @@ export async function cropRegionToBase64(
   return { base64, width, height, sizeKB };
 }
 
-/** 呼叫 /api/recognize 識別區域內容（含失敗自動重試最多 2 次） */
+/** 呼叫 /api/recognize 識別區域內容（含失敗自動重試 + 429 速率限制特殊處理）
+ *  429 處理：等 10 秒重試同模型；連續 2 次 429 → 退回 RATE_LIMIT_FALLBACK_MODEL */
 export async function recognizeRegionWithRetry(
   base64: string,
   promptText: string,
@@ -409,12 +453,18 @@ export async function recognizeRegionWithRetry(
   apiKey?: string,
 ): Promise<{ success: boolean; text?: string; error?: string }> {
   let lastError = '';
+  let currentModel = modelId;
+  let rateLimitHits = 0;
+  let errorRetries = 0;
 
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+  while (true) {
+    // 全域 429 暫停：任一 worker 觸發後，所有 worker 送出前都會等
+    await waitForGlobalRateLimit();
+
     try {
-      if (attempt > 0) {
+      if (errorRetries > 0 || rateLimitHits > 0) {
         const retryTs = new Date().toLocaleTimeString('en-US', { hour12: false });
-        console.log(`[analysisHelpers][${retryTs}] 🔄 Region recognize retry ${attempt}/${MAX_RETRIES}...`);
+        console.log(`[analysisHelpers][${retryTs}] 🔄 Region p${page}r${regionId} retry (errors: ${errorRetries}, 429s: ${rateLimitHits}, model: ${currentModel})...`);
       }
 
       const response = await fetch('/api/recognize', {
@@ -423,7 +473,7 @@ export async function recognizeRegionWithRetry(
         body: JSON.stringify({
           image: base64,
           prompt: promptText,
-          model: modelId,
+          model: currentModel,
           page,
           regionId,
           ...(apiKey ? { apiKey } : {}),
@@ -435,21 +485,37 @@ export async function recognizeRegionWithRetry(
         return { success: true, text: result.text };
       }
 
-      lastError = result.error || '未知錯誤';
-      if (attempt < MAX_RETRIES) {
-        const delay = RETRY_BASE_DELAY_MS * (attempt + 1);
-        await new Promise((r) => setTimeout(r, delay));
-        continue;
+      // 429 速率限制：設定全域暫停 + per-region 計數決定是否退回模型
+      if (result.rateLimited) {
+        rateLimitHits++;
+        setGlobalRateLimitPause();
+        if (rateLimitHits >= 2 && currentModel !== RATE_LIMIT_FALLBACK_MODEL) {
+          const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
+          console.log(`[analysisHelpers][${ts}] 🔀 Region p${page}r${regionId}: 連續 ${rateLimitHits} 次 429，退回 ${RATE_LIMIT_FALLBACK_MODEL}`);
+          currentModel = RATE_LIMIT_FALLBACK_MODEL;
+        }
+        if (rateLimitHits > MAX_RATE_LIMIT_RETRIES) {
+          return { success: false, error: `429 超過 ${MAX_RATE_LIMIT_RETRIES} 次` };
+        }
+        const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
+        console.log(`[analysisHelpers][${ts}] ⏳ Region p${page}r${regionId}: 429 速率限制，全域暫停 ${RATE_LIMIT_DELAY_MS / 1000}s`);
+        continue; // 下一輪迴圈開頭的 waitForGlobalRateLimit() 會等
       }
+
+      // 一般錯誤
+      lastError = result.error || '未知錯誤';
+      errorRetries++;
+      if (errorRetries > MAX_RETRIES) return { success: false, error: lastError };
+
+      const delay = RETRY_BASE_DELAY_MS * errorRetries;
+      await new Promise((r) => setTimeout(r, delay));
     } catch (err) {
       lastError = err instanceof Error ? err.message : '未知錯誤';
-      if (attempt < MAX_RETRIES) {
-        const delay = RETRY_BASE_DELAY_MS * (attempt + 1);
-        await new Promise((r) => setTimeout(r, delay));
-        continue;
-      }
+      errorRetries++;
+      if (errorRetries > MAX_RETRIES) return { success: false, error: lastError };
+
+      const delay = RETRY_BASE_DELAY_MS * errorRetries;
+      await new Promise((r) => setTimeout(r, delay));
     }
   }
-
-  return { success: false, error: lastError };
 }
