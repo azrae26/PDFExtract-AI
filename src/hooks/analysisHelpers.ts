@@ -368,7 +368,7 @@ export async function renderPageCanvas(
   canvas.width = viewport.width;
   canvas.height = viewport.height;
   const ctx = canvas.getContext('2d')!;
-  await pdfPage.render({ canvas, canvasContext: ctx, viewport }).promise;
+  await pdfPage.render({ canvasContext: ctx, viewport }).promise;
   return { canvas, viewport: { width: viewport.width, height: viewport.height } };
 }
 
@@ -413,7 +413,7 @@ export async function cropRegionToBase64(
   fullCanvas.width = viewport.width;
   fullCanvas.height = viewport.height;
   const ctx = fullCanvas.getContext('2d')!;
-  await pdfPage.render({ canvas: fullCanvas, canvasContext: ctx, viewport }).promise;
+  await pdfPage.render({ canvasContext: ctx, viewport }).promise;
 
   // bbox 歸一化座標 → 像素座標
   const [x1, y1, x2, y2] = region.bbox;
