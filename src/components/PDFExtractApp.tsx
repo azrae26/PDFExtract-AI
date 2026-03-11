@@ -122,6 +122,12 @@ export default function PDFExtractApp() {
   /** 切換顯示校正前/校正後 bbox（全域，跨檔案共享） */
   const [showOriginalBbox, setShowOriginalBbox] = useState(false);
 
+  // === 匯出報告狀態 ===
+  const [exportSingleState, setExportSingleState] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
+  const [exportSingleError, setExportSingleError] = useState('');
+  const [exportAllState, setExportAllState] = useState<'idle' | 'loading' | 'done'>('idle');
+  const [exportAllResult, setExportAllResult] = useState<{ success: number; failed: number; errors: string[] } | null>(null);
+
   // === useFileManager Hook（檔案生命週期 + 分析流程）===
   const {
     files, setFiles,
@@ -163,6 +169,12 @@ export default function PDFExtractApp() {
   useEffect(() => { saveConfig({ fileListWidth }); }, [fileListWidth]);
   useEffect(() => { saveConfig({ leftWidth }); }, [leftWidth]);
   useEffect(() => { saveConfig({ rightWidth }); }, [rightWidth]);
+
+  // 切換活躍檔案時重置單篇匯出狀態，避免舊的成功/失敗狀態誤導
+  useEffect(() => {
+    setExportSingleState('idle');
+    setExportSingleError('');
+  }, [activeFileId]);
 
   // === 啟動時從伺服器載入共享設定（覆蓋本地 localStorage） ===
   useEffect(() => {
@@ -463,6 +475,94 @@ export default function PDFExtractApp() {
     });
   }, [updateActiveFileRegions]);
 
+  // === 匯出報告：組合提取文字內容 ===
+  const buildExportContent = (pageRegionsMap: Map<number, Region[]>): string => {
+    const lines: string[] = [];
+    for (const [, regions] of Array.from(pageRegionsMap.entries()).sort(([a], [b]) => a - b)) {
+      for (const r of regions) {
+        if (r.text?.trim()) {
+          lines.push(r.text);
+          lines.push('');
+        }
+      }
+    }
+    return lines.join('\n').trim();
+  };
+
+  // === 匯出報告：呼叫代理 API（含前端必填驗證）===
+  const callExportAPI = async (file: { selectedCode?: string; selectedBroker?: string; selectedDate?: string; pageRegions: Map<number, Region[]>; name: string }) => {
+    if (!file.selectedCode || !file.selectedBroker || !file.selectedDate) {
+      throw new Error('請先確認股票代號、券商名、日期');
+    }
+    const content = buildExportContent(file.pageRegions);
+    // API 要求 YYYY-MM-DD 格式，UI 可能存為 YYYY/MM/DD，統一轉換
+    const dateForApi = file.selectedDate.replace(/\//g, '-');
+    const res = await fetch('/api/export-report', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        type: 'company',
+        name: file.selectedCode,
+        provider: file.selectedBroker,
+        date: dateForApi,
+        content,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      const msg = Array.isArray(data?.error?.message)
+        ? data.error.message[0]
+        : data?.error?.message || `HTTP ${res.status}`;
+      throw new Error(msg);
+    }
+    return data;
+  };
+
+  // === 匯出單篇報告（當前活躍檔案）===
+  const handleExportSingle = useCallback(async () => {
+    if (!activeFile) return;
+    setExportSingleState('loading');
+    setExportSingleError('');
+    const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
+    try {
+      await callExportAPI(activeFile);
+      setExportSingleState('success');
+      console.log(`[PDFExtractApp][${ts}] ✅ 匯出成功: ${activeFile.name}`);
+      setTimeout(() => setExportSingleState('idle'), 1500);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : '未知錯誤';
+      setExportSingleState('error');
+      setExportSingleError(msg);
+      console.error(`[PDFExtractApp][${ts}] ❌ 匯出失敗: ${activeFile.name} — ${msg}`);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeFile]);
+
+  // === 匯出全部報告（依序處理有內容的檔案）===
+  const handleExportAll = useCallback(async () => {
+    const targets = files.filter((f) => f.pageRegions.size > 0);
+    if (targets.length === 0) return;
+    setExportAllState('loading');
+    setExportAllResult(null);
+    const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
+    let success = 0;
+    const errors: string[] = [];
+    for (const file of targets) {
+      try {
+        await callExportAPI(file);
+        success++;
+        console.log(`[PDFExtractApp][${ts}] ✅ 匯出全部 - 成功: ${file.name}`);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : '未知錯誤';
+        errors.push(`${file.name}: ${msg}`);
+        console.error(`[PDFExtractApp][${ts}] ❌ 匯出全部 - 失敗: ${file.name} — ${msg}`);
+      }
+    }
+    setExportAllState('done');
+    setExportAllResult({ success, failed: errors.length, errors });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [files]);
+
   // === 點擊文字框 → 滾動 PDF 到對應框 ===
   const handleClickRegion = useCallback((regionKey: string) => {
     setScrollTarget(null);
@@ -675,6 +775,10 @@ export default function PDFExtractApp() {
           onToggleAnalysis={handleToggleAnalysis}
           brokerSkipMap={brokerSkipMap}
           skipLastPages={skipLastPages}
+          onExportAll={handleExportAll}
+          exportAllState={exportAllState}
+          exportAllResult={exportAllResult}
+          onExportAllReset={() => { setExportAllState('idle'); setExportAllResult(null); }}
         />
       </div>
 
@@ -823,6 +927,9 @@ export default function PDFExtractApp() {
           onRegionRemove={handleRegionRemove}
           onReorderRegions={handleReorderRegions}
           scrollToRegionKey={scrollToTextKey}
+          onExportReport={handleExportSingle}
+          exportState={exportSingleState}
+          exportError={exportSingleError}
         />
       </div>
     </div>

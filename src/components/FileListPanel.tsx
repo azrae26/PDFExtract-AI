@@ -24,6 +24,14 @@ interface FileListPanelProps {
   brokerSkipMap: Record<string, number>;
   /** 全域忽略末尾頁數 */
   skipLastPages: number;
+  /** 匯出全部報告 */
+  onExportAll: () => void;
+  /** 匯出全部的進行狀態 */
+  exportAllState: 'idle' | 'loading' | 'done';
+  /** 匯出全部的結果（成功/失敗筆數與錯誤訊息） */
+  exportAllResult: { success: number; failed: number; errors: string[] } | null;
+  /** 重置匯出全部狀態 */
+  onExportAllReset: () => void;
 }
 
 /** 計算單檔實際要分析的頁數（numPages - effectiveSkip） */
@@ -92,6 +100,10 @@ export default function FileListPanel({
   onToggleAnalysis,
   brokerSkipMap,
   skipLastPages,
+  onExportAll,
+  exportAllState,
+  exportAllResult,
+  onExportAllReset,
 }: FileListPanelProps) {
   const listRef = useRef<HTMLDivElement>(null);
   const activeItemRef = useRef<HTMLLIElement>(null);
@@ -142,7 +154,7 @@ export default function FileListPanel({
   }
   return (
     <div className="h-full flex flex-col bg-gray-50 border-r border-gray-200 overflow-hidden">
-      {/* 標題 + 清空按鈕 */}
+      {/* 標題 + 匯出全部 + 清空按鈕 */}
       <div className="px-4 h-11 border-b border-gray-200 bg-gray-50 flex items-center justify-between flex-shrink-0">
         <h2 className="text-sm font-semibold text-gray-500">
           檔案列表
@@ -151,13 +163,50 @@ export default function FileListPanel({
           )}
         </h2>
         {files.length > 0 && (
-          <button
-            onClick={onClearAll}
-            className="px-1.5 py-0.5 text-[13px] rounded text-red-400 hover:text-white hover:bg-red-500 transition-colors cursor-pointer"
-            title="清空所有檔案"
-          >
-            清空
-          </button>
+          <div className="flex items-center gap-1">
+            {/* 匯出全部按鈕 */}
+            {exportAllState === 'idle' && (
+              <button
+                onClick={onExportAll}
+                className="px-1.5 py-0.5 text-[13px] rounded text-blue-500 hover:text-white hover:bg-blue-500 transition-colors cursor-pointer"
+                title="匯出所有報告到研究報告 API"
+              >
+                匯出全部
+              </button>
+            )}
+            {exportAllState === 'loading' && (
+              <span className="px-1.5 py-0.5 text-[13px] rounded text-gray-400">
+                匯出中...
+              </span>
+            )}
+            {exportAllState === 'done' && exportAllResult && (
+              <button
+                onClick={onExportAllReset}
+                className={`px-1.5 py-0.5 text-[13px] rounded transition-colors cursor-pointer ${
+                  exportAllResult.failed === 0
+                    ? 'text-green-600 hover:bg-green-50'
+                    : 'text-red-500 hover:bg-red-50'
+                }`}
+                title={
+                  exportAllResult.failed === 0
+                    ? `成功匯出 ${exportAllResult.success} 筆`
+                    : `成功 ${exportAllResult.success} 筆，失敗 ${exportAllResult.failed} 筆\n${exportAllResult.errors.join('\n')}`
+                }
+              >
+                {exportAllResult.failed === 0
+                  ? `✓ ${exportAllResult.success}筆`
+                  : `✗ ${exportAllResult.failed}筆失敗`
+                }
+              </button>
+            )}
+            <button
+              onClick={onClearAll}
+              className="px-1.5 py-0.5 text-[13px] rounded text-red-400 hover:text-white hover:bg-red-500 transition-colors cursor-pointer"
+              title="清空所有檔案"
+            >
+              清空
+            </button>
+          </div>
         )}
       </div>
 

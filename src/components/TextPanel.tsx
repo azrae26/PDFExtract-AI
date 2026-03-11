@@ -25,6 +25,12 @@ interface TextPanelProps {
   onReorderRegions: (page: number, reorderedRegions: Region[]) => void;
   /** 從 PdfViewer 點擊 BoundingBox 時滾動到對應文字框（regionKey 格式 "page-regionId"） */
   scrollToRegionKey?: string | null;
+  /** 匯出當前報告到 API */
+  onExportReport?: () => void;
+  /** 匯出狀態 */
+  exportState?: 'idle' | 'loading' | 'success' | 'error';
+  /** 匯出錯誤訊息 */
+  exportError?: string;
 }
 
 export default function TextPanel({
@@ -37,6 +43,9 @@ export default function TextPanel({
   onRegionRemove,
   onReorderRegions,
   scrollToRegionKey,
+  onExportReport,
+  exportState = 'idle',
+  exportError = '',
 }: TextPanelProps) {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const regionRefs = useRef<Map<string, HTMLDivElement>>(new Map());
@@ -240,32 +249,72 @@ export default function TextPanel({
       <div className="flex items-center justify-between px-4 h-11 border-b border-gray-200 bg-gray-50 flex-shrink-0">
         <h2 className="text-sm font-semibold text-gray-700">提取文字</h2>
         {hasContent && (
-          <button
-            id="copy-all-btn"
-            onClick={handleCopyAll}
-            className={`flex items-center gap-1 text-xs font-medium px-3 py-1.5 rounded-md shadow-sm hover:shadow transition-all cursor-pointer ${
-              copiedAll
-                ? 'bg-green-500 text-white'
-                : 'bg-indigo-500 text-white hover:bg-indigo-600 active:bg-indigo-700'
-            }`}
-          >
-            {copiedAll ? (
-              <>
-                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-                </svg>
-                已複製!
-              </>
-            ) : (
-              <>
-                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                  <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
-                  <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" />
-                </svg>
-                複製全部
-              </>
+          <div className="flex items-center gap-1.5">
+            {/* 匯出單篇按鈕（複製全部的左邊） */}
+            {onExportReport && (
+              <button
+                onClick={onExportReport}
+                disabled={exportState === 'loading'}
+                title={exportState === 'error' ? exportError : '匯出此報告到研究報告 API'}
+                className={`flex items-center gap-1 text-xs font-medium px-3 py-1.5 rounded-md shadow-sm hover:shadow transition-all cursor-pointer disabled:cursor-not-allowed disabled:opacity-70 ${
+                  exportState === 'success'
+                    ? 'bg-green-500 text-white'
+                    : exportState === 'error'
+                    ? 'bg-red-500 text-white hover:bg-red-600'
+                    : exportState === 'loading'
+                    ? 'bg-gray-400 text-white'
+                    : 'bg-indigo-500 text-white hover:bg-indigo-600 active:bg-indigo-700'
+                }`}
+              >
+                {exportState === 'success' && (
+                  <>
+                    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                    </svg>
+                    已匯出
+                  </>
+                )}
+                {exportState === 'error' && <>✗ 失敗</>}
+                {exportState === 'loading' && <>匯出中...</>}
+                {exportState === 'idle' && (
+                  <>
+                    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                    </svg>
+                    匯出
+                  </>
+                )}
+              </button>
             )}
-          </button>
+
+            {/* 複製全部按鈕 */}
+            <button
+              id="copy-all-btn"
+              onClick={handleCopyAll}
+              className={`flex items-center gap-1 text-xs font-medium px-3 py-1.5 rounded-md shadow-sm hover:shadow transition-all cursor-pointer ${
+                copiedAll
+                  ? 'bg-green-500 text-white'
+                  : 'bg-indigo-500 text-white hover:bg-indigo-600 active:bg-indigo-700'
+              }`}
+            >
+              {copiedAll ? (
+                <>
+                  <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                  </svg>
+                  已複製!
+                </>
+              ) : (
+                <>
+                  <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+                    <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" />
+                  </svg>
+                  複製全部
+                </>
+              )}
+            </button>
+          </div>
         )}
       </div>
 
