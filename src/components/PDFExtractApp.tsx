@@ -506,6 +506,7 @@ export default function PDFExtractApp() {
         provider: file.selectedBroker,
         date: dateForApi,
         content,
+        info: content,
       }),
     });
     const data = await res.json();
