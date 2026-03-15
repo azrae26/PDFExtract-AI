@@ -410,8 +410,6 @@ export default function PDFExtractApp() {
   // === 新增 region（使用者在 PDF 上手動畫框）===
   const handleRegionAdd = useCallback(
     async (page: number, bbox: [number, number, number, number]) => {
-      const { extractTextForRegions } = await import('@/lib/pdfTextExtract');
-
       // 從 filesRef 讀取最新 regions 計算 newId（避免 closure stale）
       const currentFile = filesRef.current.find((f) => f.id === activeFileIdRef.current);
       const currentRegions = currentFile?.pageRegions.get(page) || [];
