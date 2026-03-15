@@ -53,6 +53,11 @@ export function isMalformedBbox(bbox: [number, number, number, number], isPortra
   return false;
 }
 
+/** 判定 bbox 是否含有 NaN / Infinity（AI 回傳非法數值） */
+export function hasNaNBbox(bbox: [number, number, number, number]): boolean {
+  return bbox.some((v) => !isFinite(v));
+}
+
 // === API 失敗重試設定 ===
 export const MAX_RETRIES = 2; // 最多重試 2 次（總共 3 次嘗試）
 export const RETRY_BASE_DELAY_MS = 1500; // 首次重試等待 1.5 秒，之後遞增

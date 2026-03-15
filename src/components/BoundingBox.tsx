@@ -158,7 +158,8 @@ export default function BoundingBox({
 
   // === 按鈕定位：一律往右外移；高度足夠時靠上緣，太小時以中線為中心對稱分佈 ===
   const btnPairHeight = 44; // 20px button + 4px gap + 20px button
-  const groupTop = height >= btnPairHeight ? 0 : height / 2 - btnPairHeight / 2;
+  const safeHeight = isFinite(height) ? height : 0;
+  const groupTop = safeHeight >= btnPairHeight ? 0 : safeHeight / 2 - btnPairHeight / 2;
   const xBtnStyle: React.CSSProperties = { top: groupTop, right: -25 };
   const copyBtnStyle: React.CSSProperties = { top: groupTop + 24, right: -25 };
 

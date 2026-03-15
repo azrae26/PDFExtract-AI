@@ -30,6 +30,8 @@ import {
   recognizeRegionWithRetry,
   isMalformedBbox,
   MAX_MALFORMED_RETRIES,
+  hasNaNBbox,
+  MAX_RETRIES,
 } from './analysisHelpers';
 import useRegionRecognize from './useRegionRecognize';
 
@@ -616,6 +618,34 @@ export default function useAnalysis({
             if (result.regions.length === 0) result.hasAnalysis = false;
             const mTs = new Date().toLocaleTimeString('en-US', { hour12: false });
             console.log(`[useAnalysis][${mTs}] ⚠️ Page ${pageNum}: ${malformedRegions.length} malformed bbox(es) filtered after ${MAX_MALFORMED_RETRIES} retries`);
+          }
+        }
+
+        // === NaN bbox 偵測：AI 回傳非法數值 → 退回重跑（最多 MAX_RETRIES 次）===
+        if (result && result.regions.length > 0) {
+          const nanRegions = result.regions.filter((r: Region) => hasNaNBbox(r.bbox));
+          if (nanRegions.length > 0) {
+            const retryKey = `${fileId}:${pageNum}:nan`;
+            const retryCount = malformedRetryMap.get(retryKey) || 0;
+            if (retryCount < MAX_RETRIES) {
+              malformedRetryMap.set(retryKey, retryCount + 1);
+              taskQueue.unshift({ fileId, pageNum });
+              setQueuedPagesMap((prev) => {
+                const nm = new Map(prev);
+                const s = new Set(nm.get(fileId) || []);
+                s.add(pageNum);
+                nm.set(fileId, s);
+                return nm;
+              });
+              const nTs = new Date().toLocaleTimeString('en-US', { hour12: false });
+              console.log(`[useAnalysis][${nTs}] ⚠️ Page ${pageNum} has ${nanRegions.length} NaN bbox(es), re-queuing (${retryCount + 1}/${MAX_RETRIES})`);
+              return;
+            }
+            // 達到重跑上限 → 過濾掉 NaN region，保留有效的
+            result.regions = result.regions.filter((r: Region) => !hasNaNBbox(r.bbox));
+            if (result.regions.length === 0) result.hasAnalysis = false;
+            const nTs = new Date().toLocaleTimeString('en-US', { hour12: false });
+            console.log(`[useAnalysis][${nTs}] ⚠️ Page ${pageNum}: ${nanRegions.length} NaN bbox(es) filtered after ${MAX_RETRIES} retries`);
           }
         }
 

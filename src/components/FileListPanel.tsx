@@ -168,7 +168,7 @@ export default function FileListPanel({
             {exportAllState === 'idle' && (
               <button
                 onClick={onExportAll}
-                className="px-1.5 py-0.5 text-[13px] rounded text-blue-500 hover:text-white hover:bg-blue-500 transition-colors cursor-pointer"
+                className="px-1.5 py-0.5 text-[13px] rounded text-blue-500 hover:text-white hover:bg-blue-500 transition-colors cursor-pointer min-w-[38px]"
                 title="匯出所有報告到研究報告 API"
               >
                 匯出全部
@@ -182,7 +182,7 @@ export default function FileListPanel({
             {exportAllState === 'done' && exportAllResult && (
               <button
                 onClick={onExportAllReset}
-                className={`px-1.5 py-0.5 text-[13px] rounded transition-colors cursor-pointer ${
+                className={`px-1.5 py-0.5 text-[13px] rounded transition-colors cursor-pointer min-w-[38px] ${
                   exportAllResult.failed === 0
                     ? 'text-green-600 hover:bg-green-50'
                     : 'text-red-500 hover:bg-red-50'
@@ -201,7 +201,7 @@ export default function FileListPanel({
             )}
             <button
               onClick={onClearAll}
-              className="px-1.5 py-0.5 text-[13px] rounded text-red-400 hover:text-white hover:bg-red-500 transition-colors cursor-pointer"
+              className="px-1.5 py-0.5 text-[13px] rounded text-red-400 hover:text-white hover:bg-red-500 transition-colors cursor-pointer min-w-[38px]"
               title="清空所有檔案"
             >
               清空
