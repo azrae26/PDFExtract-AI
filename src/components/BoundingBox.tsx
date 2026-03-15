@@ -183,12 +183,16 @@ export default function BoundingBox({
       minWidth={15}
       minHeight={15}
       onDragStop={(_e, d) => {
+        const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
+        console.log(`[BoundingBox][${ts}] onDragStop r${region.id} x=${d.x.toFixed(1)} y=${d.y.toFixed(1)} w=${width.toFixed(1)} h=${height.toFixed(1)}`);
         const newBbox = pixelToNormalized(d.x, d.y, width, height, displayWidth, displayHeight);
         onUpdate(newBbox);
       }}
       onResizeStop={(_e, _direction, ref, _delta, position) => {
         const newWidth = parseFloat(ref.style.width);
         const newHeight = parseFloat(ref.style.height);
+        const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
+        console.log(`[BoundingBox][${ts}] ⚡ onResizeStop r${region.id} x=${position.x.toFixed(1)} y=${position.y.toFixed(1)} w=${newWidth.toFixed(1)} h=${newHeight.toFixed(1)}`);
         const newBbox = pixelToNormalized(
           position.x,
           position.y,

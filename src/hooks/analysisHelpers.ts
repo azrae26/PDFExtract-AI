@@ -176,6 +176,7 @@ export async function analyzePageWithRetry(
   sessionId: number,
   isSessionValid: SessionValidator,
   apiKey?: string,
+  openRouterApiKey?: string,
 ) {
   const imageBase64 = await renderPageToImage(pageNum, pdfDoc, sessionId, isSessionValid);
   if (!imageBase64) return null;
@@ -209,6 +210,7 @@ export async function analyzePageWithRetry(
           page: pageNum,
           model: currentModel,
           ...(apiKey ? { apiKey } : {}),
+          ...(openRouterApiKey ? { openRouterApiKey } : {}),
         }),
       });
 
@@ -451,6 +453,7 @@ export async function recognizeRegionWithRetry(
   page: number,
   regionId: number,
   apiKey?: string,
+  openRouterApiKey?: string,
 ): Promise<{ success: boolean; text?: string; error?: string }> {
   let lastError = '';
   let currentModel = modelId;
@@ -477,6 +480,7 @@ export async function recognizeRegionWithRetry(
           page,
           regionId,
           ...(apiKey ? { apiKey } : {}),
+          ...(openRouterApiKey ? { openRouterApiKey } : {}),
         }),
       });
       const result = await response.json();

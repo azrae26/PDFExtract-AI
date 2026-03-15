@@ -236,6 +236,8 @@ export default function PdfViewer({
   // 某頁 PDF 載入完成 — 記錄寬高比並計算顯示尺寸
   const handlePageLoad = useCallback(
     (pageNum: number, page: pdfjs.PDFPageProxy) => {
+      const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
+      console.log(`[PdfViewer][${ts}] ⚡ handlePageLoad page=${pageNum}`);
       const viewport = page.getViewport({ scale: 1 });
       const ratio = viewport.height / viewport.width;
       pageRatiosRef.current.set(pageNum, ratio);

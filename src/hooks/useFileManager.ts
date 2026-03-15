@@ -92,6 +92,8 @@ interface UseFileManagerOptions {
   brokerAliasGroups: string[];
   /** Gemini API 金鑰（前端使用者輸入） */
   apiKey: string;
+  /** OpenRouter API 金鑰（用於 OpenRouter 模型如 Qwen） */
+  openRouterApiKey: string;
 }
 
 // === Hook 輸出介面 ===
@@ -158,6 +160,7 @@ export default function useFileManager({
   brokerSkipMap,
   brokerAliasGroups,
   apiKey,
+  openRouterApiKey,
 }: UseFileManagerOptions): FileManagerResult {
   // === 多檔案狀態 ===
   const [files, setFiles] = useState<FileEntry[]>([]);
@@ -493,6 +496,7 @@ export default function useFileManager({
     model,
     batchSize,
     apiKey,
+    openRouterApiKey,
     loadPdfDoc: loadPdfDocOnDemand,
   });
   // 橋接 cancelQueuedPage 到 ref（供 updateFileReport 回呼使用）
@@ -653,10 +657,10 @@ export default function useFileManager({
         setFiles((prev) =>
           prev.map((f) => (f.id === targetFileId ? { ...f, status: 'processing' as const, analysisPages: 0, completedPages: 0 } : f))
         );
-        analyzeAllPages(numPagesToAnalyze, prompt, model, tablePrompt, batchSize, targetFileId, fileUrl, getNextFileForPool, handlePoolFileComplete, undefined, undefined, apiKey);
+        analyzeAllPages(numPagesToAnalyze, prompt, model, tablePrompt, batchSize, targetFileId, fileUrl, getNextFileForPool, handlePoolFileComplete, undefined, undefined, apiKey, openRouterApiKey);
       }
     },
-    [isAnalyzing, prompt, model, tablePrompt, batchSize, apiKey, analyzeAllPages, updateFileRegions, updateFileProgress, stopSingleFile, getNextFileForPool, handlePoolFileComplete]
+    [isAnalyzing, prompt, model, tablePrompt, batchSize, apiKey, openRouterApiKey, analyzeAllPages, updateFileRegions, updateFileProgress, stopSingleFile, getNextFileForPool, handlePoolFileComplete]
   );
 
   // === 切換檔案時：清理 pdfDocRef，條件性中斷 session ===
@@ -831,8 +835,9 @@ export default function useFileManager({
   // 若 pdfDocCacheRef 已有該檔案的 doc（PdfViewer 預掛載已載入），直接呼叫 analyzeAllPages
   // 否則等 handleDocumentLoadForFile 觸發（防止雙重啟動由 analysisFileIdRef 守衛）
   const processNextInQueue = useCallback(() => {
-    // 無 API 金鑰時不啟動分析
-    if (!apiKey) {
+    // 無 API 金鑰時不啟動分析（依模型類型判斷對應的金鑰）
+    const hasKey = model.includes('/') ? !!openRouterApiKey : !!apiKey;
+    if (!hasKey) {
       processingQueueRef.current = false;
       return;
     }
@@ -874,7 +879,7 @@ export default function useFileManager({
       const completedPages = buildCompletedPages(nextQueued, pagesToAnalyze);
       const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
       console.log(`[useFileManager][${ts}] 🚀 PDF already cached, starting analysis directly for ${nextQueued.id} (${completedPages?.size || 0} pages already done)`);
-      analyzeAllPages(pagesToAnalyze, prompt, model, tablePrompt, batchSize, nextQueued.id, nextQueued.url, getNextFileForPool, handlePoolFileComplete, effectiveSkip2, completedPages, apiKey);
+      analyzeAllPages(pagesToAnalyze, prompt, model, tablePrompt, batchSize, nextQueued.id, nextQueued.url, getNextFileForPool, handlePoolFileComplete, effectiveSkip2, completedPages, apiKey, openRouterApiKey);
     } else {
       // PDF 不在快取中（檔案可能不在預載視窗內，PdfViewer 未掛載）→ 主動載入 PDF 後啟動分析
       const queuedFileId = nextQueued.id;
@@ -906,7 +911,7 @@ export default function useFileManager({
         });
         const ts2 = new Date().toLocaleTimeString('en-US', { hour12: false });
         console.log(`[useFileManager][${ts2}] 🚀 PDF loaded on-demand, starting analysis for ${queuedFileId} (${completedPagesAsync.size} pages already done)`);
-        analyzeAllPages(pagesToAnalyze, prompt, model, tablePrompt, batchSize, queuedFileId, queuedFileUrl, getNextFileForPool, handlePoolFileComplete, effectiveSkipAsync, completedPagesAsync.size > 0 ? completedPagesAsync : undefined, apiKey);
+        analyzeAllPages(pagesToAnalyze, prompt, model, tablePrompt, batchSize, queuedFileId, queuedFileUrl, getNextFileForPool, handlePoolFileComplete, effectiveSkipAsync, completedPagesAsync.size > 0 ? completedPagesAsync : undefined, apiKey, openRouterApiKey);
       }).catch((e) => {
         const ts2 = new Date().toLocaleTimeString('en-US', { hour12: false });
         console.error(`[useFileManager][${ts2}] ❌ Failed to load PDF on-demand for ${queuedFileId}:`, e);
@@ -916,7 +921,7 @@ export default function useFileManager({
         processingQueueRef.current = false;
       });
     }
-  }, [skipLastPages, prompt, model, tablePrompt, batchSize, apiKey, analyzeAllPages, getNextFileForPool, handlePoolFileComplete]);
+  }, [skipLastPages, prompt, model, tablePrompt, batchSize, apiKey, openRouterApiKey, analyzeAllPages, getNextFileForPool, handlePoolFileComplete]);
 
   // === 觸發佇列處理（供外部呼叫，如「繼續分析」「全部重新分析」後啟動佇列）===
   const triggerQueueProcessing = useCallback(() => {
@@ -1060,10 +1065,10 @@ export default function useFileManager({
             completedPages.add(pageNum);
           }
         });
-        analyzeAllPages(pagesToAnalyze, prompt, model, tablePrompt, batchSize, fileId, currentFile.url, getNextFileForPool, handlePoolFileComplete, effectiveSkipDoc, completedPages.size > 0 ? completedPages : undefined, apiKey);
+        analyzeAllPages(pagesToAnalyze, prompt, model, tablePrompt, batchSize, fileId, currentFile.url, getNextFileForPool, handlePoolFileComplete, effectiveSkipDoc, completedPages.size > 0 ? completedPages : undefined, apiKey, openRouterApiKey);
       }
     },
-    [prompt, model, tablePrompt, batchSize, skipLastPages, apiKey, analyzeAllPages, getNextFileForPool, handlePoolFileComplete]
+    [prompt, model, tablePrompt, batchSize, skipLastPages, apiKey, openRouterApiKey, analyzeAllPages, getNextFileForPool, handlePoolFileComplete]
   );
 
   // === 分析完成後，標記殘餘 processing 檔案 + 處理 stopped 狀態 ===

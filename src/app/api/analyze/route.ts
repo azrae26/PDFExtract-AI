@@ -1,8 +1,9 @@
 /**
- * 功能：Gemini API 分析端點
- * 職責：接收 PDF 頁面圖片 + Prompt，呼叫 Gemini API 回傳標註區域與券商名（report）
- * 依賴：@google/generative-ai、前端傳入的 apiKey（優先）或環境變數 GEMINI_API_KEY（fallback）
- * 推理：盡量設最低 — Flash 用 thinkingBudget: 0；Pro 系列強制 thinking mode，用最小值 128
+ * 功能：AI 分析端點（Gemini / OpenRouter 雙分支）
+ * 職責：接收 PDF 頁面圖片 + Prompt，依模型類型呼叫對應 API，回傳標註區域與券商名（report）
+ * 依賴：@google/generative-ai（Gemini）、fetch（OpenRouter Chat Completions）
+ *       前端傳入的 apiKey（Gemini）或 openRouterApiKey（OpenRouter），fallback 到環境變數
+ * 推理：Gemini Flash 用 thinkingBudget: 0；Pro 系列用最小值 128；OpenRouter 無需 thinkingConfig
  */
 
 import { GoogleGenerativeAI } from '@google/generative-ai';
@@ -25,11 +26,59 @@ function getThinkingConfigMinimal(modelId: string): NonNullable<GenConfig> {
   return { thinkingConfig: { thinkingBudget: budget } } as NonNullable<GenConfig>;
 }
 
+/** 判斷是否為 OpenRouter 模型（model ID 含 "/" 即為 OpenRouter 格式，如 qwen/qwen3.5-9b） */
+function isOpenRouterModel(modelId: string): boolean {
+  return modelId.includes('/');
+}
+
+/** 呼叫 OpenRouter Chat Completions API，回傳模型生成的文字內容 */
+async function callOpenRouter(modelId: string, apiKey: string, prompt: string, imageBase64: string): Promise<string> {
+  const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: modelId,
+      reasoning: { effort: 'minimal' },
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'text', text: prompt },
+          { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${imageBase64}` } },
+        ],
+      }],
+    }),
+  });
+
+  if (response.status === 429) {
+    throw Object.assign(new Error('Rate limit exceeded'), { status: 429 });
+  }
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => '');
+    throw new Error(`OpenRouter API error ${response.status}: ${errorText}`);
+  }
+
+  const data = await response.json();
+  // choices[0].message.content 可能是字串或陣列（部分模型）
+  const content = data.choices?.[0]?.message?.content;
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content
+      .filter((c: { type: string }) => c.type === 'text')
+      .map((c: { text: string }) => c.text)
+      .join('');
+  }
+  throw new Error('OpenRouter: unexpected response format');
+}
+
 export async function POST(request: NextRequest): Promise<NextResponse<AnalyzeResponse>> {
   const timestamp = new Date().toLocaleTimeString('en-US', { hour12: false });
 
   try {
-    const { image, prompt, page, model: modelId, apiKey: clientApiKey } = await request.json();
+    const { image, prompt, page, model: modelId, apiKey: clientApiKey, openRouterApiKey: clientOrKey } = await request.json();
 
     if (!image || !prompt) {
       console.error(`[AnalyzeRoute][${timestamp}] ❌ Missing image or prompt`);
@@ -39,53 +88,77 @@ export async function POST(request: NextRequest): Promise<NextResponse<AnalyzeRe
       );
     }
 
-    // 優先使用前端傳入的 apiKey，fallback 到環境變數
-    const apiKey = clientApiKey || process.env.GEMINI_API_KEY;
-    if (!apiKey || apiKey === 'YOUR_GEMINI_API_KEY_HERE') {
-      console.error(`[AnalyzeRoute][${timestamp}] ❌ GEMINI_API_KEY not configured`);
-      return NextResponse.json(
-        { success: false, error: '請先設定 Gemini API 金鑰' },
-        { status: 400 }
-      );
-    }
-
     const selectedModel = modelId || 'gemini-2.5-flash';
     const imageSizeKB = Math.round((image.length * 3) / 4 / 1024);
-    console.log(`[AnalyzeRoute][${timestamp}] 📄 Analyzing page ${page} with ${selectedModel} (image: ${imageSizeKB} KB)...`);
 
-    const genAI = new GoogleGenerativeAI(apiKey);
-    const contentParts = [
-      prompt,
-      {
-        inlineData: {
-          mimeType: 'image/jpeg',
-          data: image,
-        },
-      },
-    ];
+    let responseText: string;
 
-    let result;
-
-    try {
-      const modelObj = genAI.getGenerativeModel({
-        model: selectedModel,
-        generationConfig: getThinkingConfigMinimal(selectedModel),
-      });
-      result = await modelObj.generateContent(contentParts);
-    } catch (err) {
-      const errMsg = err instanceof Error ? err.message : String(err);
-      if (errMsg.includes('429')) {
-        const ts2 = new Date().toLocaleTimeString('en-US', { hour12: false });
-        console.log(`[AnalyzeRoute][${ts2}] ⚠️ ${selectedModel} rate limited (429)`);
+    if (isOpenRouterModel(selectedModel)) {
+      // === OpenRouter 分支 ===
+      const orApiKey = clientOrKey || process.env.OPENROUTER_API_KEY;
+      if (!orApiKey) {
+        console.error(`[AnalyzeRoute][${timestamp}] ❌ OpenRouter API key not configured`);
         return NextResponse.json(
-          { success: false, error: 'Rate limit exceeded', rateLimited: true },
-          { status: 429 }
+          { success: false, error: '請先設定 OpenRouter API 金鑰' },
+          { status: 400 }
         );
       }
-      throw err;
-    }
 
-    const responseText = result.response.text();
+      console.log(`[AnalyzeRoute][${timestamp}] 📄 Analyzing page ${page} with ${selectedModel} via OpenRouter (image: ${imageSizeKB} KB)...`);
+
+      try {
+        responseText = await callOpenRouter(selectedModel, orApiKey, prompt, image);
+      } catch (err) {
+        const errObj = err as { status?: number; message?: string };
+        if (errObj.status === 429 || (errObj.message ?? '').includes('429')) {
+          const ts2 = new Date().toLocaleTimeString('en-US', { hour12: false });
+          console.log(`[AnalyzeRoute][${ts2}] ⚠️ ${selectedModel} rate limited (429)`);
+          return NextResponse.json(
+            { success: false, error: 'Rate limit exceeded', rateLimited: true },
+            { status: 429 }
+          );
+        }
+        throw err;
+      }
+    } else {
+      // === Gemini 分支 ===
+      const apiKey = clientApiKey || process.env.GEMINI_API_KEY;
+      if (!apiKey || apiKey === 'YOUR_GEMINI_API_KEY_HERE') {
+        console.error(`[AnalyzeRoute][${timestamp}] ❌ GEMINI_API_KEY not configured`);
+        return NextResponse.json(
+          { success: false, error: '請先設定 Gemini API 金鑰' },
+          { status: 400 }
+        );
+      }
+
+      console.log(`[AnalyzeRoute][${timestamp}] 📄 Analyzing page ${page} with ${selectedModel} (image: ${imageSizeKB} KB)...`);
+
+      const genAI = new GoogleGenerativeAI(apiKey);
+      const contentParts = [
+        prompt,
+        { inlineData: { mimeType: 'image/jpeg', data: image } },
+      ];
+
+      try {
+        const modelObj = genAI.getGenerativeModel({
+          model: selectedModel,
+          generationConfig: getThinkingConfigMinimal(selectedModel),
+        });
+        const result = await modelObj.generateContent(contentParts);
+        responseText = result.response.text();
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        if (errMsg.includes('429')) {
+          const ts2 = new Date().toLocaleTimeString('en-US', { hour12: false });
+          console.log(`[AnalyzeRoute][${ts2}] ⚠️ ${selectedModel} rate limited (429)`);
+          return NextResponse.json(
+            { success: false, error: 'Rate limit exceeded', rateLimited: true },
+            { status: 429 }
+          );
+        }
+        throw err;
+      }
+    }
 
     // 嘗試解析 JSON — 可能被 markdown code block 包裹
     let jsonStr = responseText.trim();

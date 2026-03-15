@@ -49,6 +49,8 @@ interface UseAnalysisOptions {
   batchSize: number;
   /** Gemini API 金鑰（前端使用者輸入） */
   apiKey: string;
+  /** OpenRouter API 金鑰（用於 OpenRouter 模型如 Qwen） */
+  openRouterApiKey: string;
   /** 按需載入指定檔案的 PDFDocumentProxy（快取 miss 時用）*/
   loadPdfDoc: (fileId: string) => Promise<pdfjs.PDFDocumentProxy | null>;
 }
@@ -64,6 +66,7 @@ export default function useAnalysis({
   model,
   batchSize,
   apiKey,
+  openRouterApiKey,
   loadPdfDoc,
 }: UseAnalysisOptions) {
   const [batchIsAnalyzing, setBatchIsAnalyzing] = useState(false);
@@ -134,6 +137,7 @@ export default function useAnalysis({
     tablePrompt,
     model,
     apiKey,
+    openRouterApiKey,
   });
 
   // 合併分析狀態：批次分析 或 區域識別 任一進行中即為 true
@@ -156,6 +160,7 @@ export default function useAnalysis({
       effectiveSkip?: number,
       alreadyCompletedPages?: Set<number>,
       apiKeyText?: string,
+      openRouterApiKeyText?: string,
     ) => {
       // 記錄分析目標檔案 ID（primary file）
       // 記錄分析目標檔案 ID（primary file）
@@ -499,7 +504,7 @@ export default function useAnalysis({
             const arTs = new Date().toLocaleTimeString('en-US', { hour12: false });
             console.log(`[useAnalysis][${arTs}] 📐 Auto-recognize region bbox=[${regionBbox}]: ${width}x${height}px, ${sizeKB} KB`);
 
-            const recognizeResult = await recognizeRegionWithRetry(base64, tablePromptText, modelId, pageNum, region.id, apiKeyText);
+            const recognizeResult = await recognizeRegionWithRetry(base64, tablePromptText, modelId, pageNum, region.id, apiKeyText, openRouterApiKeyText);
 
             if (!isSessionValid(sessionId)) return;
 
@@ -576,7 +581,7 @@ export default function useAnalysis({
         });
         addAnalyzingPage(fileId, pageNum);
 
-        const result = await analyzePageWithRetry(pageNum, promptText, modelId, pdfDoc, sessionId, isSessionValid, apiKeyText);
+        const result = await analyzePageWithRetry(pageNum, promptText, modelId, pdfDoc, sessionId, isSessionValid, apiKeyText, openRouterApiKeyText);
 
         // 分析完成，移除標記
         removeAnalyzingPage(fileId, pageNum);
@@ -784,10 +789,10 @@ export default function useAnalysis({
     (numPages: number, targetFileId: string, fileUrl: string) => {
       if (numPages > 0 && fileUrl) {
         updateFileRegions(targetFileId, () => new Map());
-        analyzeAllPages(numPages, prompt, model, tablePrompt, batchSize, targetFileId, fileUrl, undefined, undefined, undefined, undefined, apiKey);
+        analyzeAllPages(numPages, prompt, model, tablePrompt, batchSize, targetFileId, fileUrl, undefined, undefined, undefined, undefined, apiKey, openRouterApiKey);
       }
     },
-    [prompt, model, tablePrompt, batchSize, apiKey, analyzeAllPages, updateFileRegions]
+    [prompt, model, tablePrompt, batchSize, apiKey, openRouterApiKey, analyzeAllPages, updateFileRegions]
   );
 
   // === 重新分析單頁（修正：支援多頁同時重送，計數會累加而非覆蓋）===
@@ -867,7 +872,7 @@ export default function useAnalysis({
       // 標記此頁正在分析（per-file）
       addAnalyzingPage(targetFileId, pageNum);
 
-      const result = await analyzePageWithRetry(pageNum, prompt, model, pdfDoc, sessionId, isSessionValid, apiKey);
+      const result = await analyzePageWithRetry(pageNum, prompt, model, pdfDoc, sessionId, isSessionValid, apiKey, openRouterApiKey);
 
       // 完成：累加 current，而非直接設定
       setAnalysisProgress((prev) => ({
@@ -945,7 +950,7 @@ export default function useAnalysis({
                 const arTs2 = new Date().toLocaleTimeString('en-US', { hour12: false });
                 console.log(`[useAnalysis][${arTs2}] 📐 Auto-recognize region bbox=[${regionBbox}]: ${width}x${height}px, ${sizeKB} KB`);
 
-                const recognizeResult = await recognizeRegionWithRetry(base64, tablePrompt, model, pageNum, region.id, apiKey);
+                const recognizeResult = await recognizeRegionWithRetry(base64, tablePrompt, model, pageNum, region.id, apiKey, openRouterApiKey);
 
                 if (!isSessionValid(sessionId)) return;
 
@@ -1028,7 +1033,7 @@ export default function useAnalysis({
         }
       }
     },
-    [prompt, model, tablePrompt, batchSize, apiKey, pdfDocRef, updateFileRegions, updateFileReport, updateFileMetadata, updateFileProgress, isSessionValid, queuedPagesMap, addAnalyzingPage, removeAnalyzingPage, loadPdfDoc]
+    [prompt, model, tablePrompt, batchSize, apiKey, openRouterApiKey, pdfDocRef, updateFileRegions, updateFileReport, updateFileMetadata, updateFileProgress, isSessionValid, queuedPagesMap, addAnalyzingPage, removeAnalyzingPage, loadPdfDoc]
   );
 
   return {

@@ -23,9 +23,10 @@ import FileListPanel from './FileListPanel';
 import { Region } from '@/lib/types';
 import { DEFAULT_PROMPT, DEFAULT_TABLE_PROMPT } from '@/lib/constants';
 import { DEFAULT_BROKER_ALIAS_GROUPS, DEFAULT_BROKER_SKIP_MAP } from '@/lib/brokerUtils';
-import { DEFAULT_MODEL } from './PdfUploader';
+import { DEFAULT_MODEL, isOpenRouterModel } from './PdfUploader';
 import useFileManager from '@/hooks/useFileManager';
 import usePanelResize from '@/hooks/usePanelResize';
+import { extractTextForRegions } from '@/lib/pdfTextExtract';
 
 // === 預設批次並行數量 ===
 const DEFAULT_BATCH_SIZE = 3;
@@ -89,6 +90,11 @@ export default function PDFExtractApp() {
     const cfg = loadConfig();
     return typeof cfg.apiKey === 'string' ? cfg.apiKey : '';
   });
+  // OpenRouter API 金鑰（持久化到 localStorage）
+  const [openRouterApiKey, setOpenRouterApiKey] = useState(() => {
+    const cfg = loadConfig();
+    return typeof cfg.openRouterApiKey === 'string' ? cfg.openRouterApiKey : '';
+  });
   // 券商 → 忽略末尾頁數映射（持久化到 localStorage）
   const [brokerSkipMap, setBrokerSkipMap] = useState<Record<string, number>>(() => {
     const cfg = loadConfig();
@@ -147,7 +153,7 @@ export default function PDFExtractApp() {
     selectFileMetadata, addFileMetadataCandidate, removeFileMetadataCandidate, clearFileMetadataCandidates,
     mountedFileIds,
   } = useFileManager({
-    prompt, tablePrompt, model, batchSize, skipLastPages, brokerSkipMap, brokerAliasGroups, apiKey,
+    prompt, tablePrompt, model, batchSize, skipLastPages, brokerSkipMap, brokerAliasGroups, apiKey, openRouterApiKey,
   });
 
   // === usePanelResize Hook（四欄分界線拖動）===
@@ -166,6 +172,7 @@ export default function PDFExtractApp() {
   useEffect(() => { saveConfig({ brokerSkipMap }); }, [brokerSkipMap]);
   useEffect(() => { saveConfig({ brokerAliasGroups }); }, [brokerAliasGroups]);
   useEffect(() => { saveConfig({ apiKey }); }, [apiKey]);
+  useEffect(() => { saveConfig({ openRouterApiKey }); }, [openRouterApiKey]);
   useEffect(() => { saveConfig({ fileListWidth }); }, [fileListWidth]);
   useEffect(() => { saveConfig({ leftWidth }); }, [leftWidth]);
   useEffect(() => { saveConfig({ rightWidth }); }, [rightWidth]);
@@ -329,8 +336,6 @@ export default function PDFExtractApp() {
         const [nx1, ny1, nx2, ny2] = newBbox;
         if (cx1 === nx1 && cy1 === ny1 && cx2 === nx2 && cy2 === ny2) return;
       }
-
-      const { extractTextForRegions } = await import('@/lib/pdfTextExtract');
 
       updateActiveFileRegions((prev) => {
         const updated = new Map(prev);
@@ -626,8 +631,10 @@ export default function PDFExtractApp() {
         (f) => f.type === 'application/pdf'
       );
       if (droppedFiles.length > 0) {
+        // 依目前選擇的模型判斷有效金鑰是否已設定
+        const hasKey = isOpenRouterModel(model) ? !!openRouterApiKey : !!apiKey;
         // 無金鑰 → 強制 idle（不觸發分析）
-        if (!apiKey) {
+        if (!hasKey) {
           handleFilesUpload(droppedFiles, 'idle');
         } else {
           // 左=當前頁並跑, 中=背景跑, 右=僅加入列表
@@ -636,12 +643,13 @@ export default function PDFExtractApp() {
         }
       }
     },
-    [handleFilesUpload, dragZone, apiKey]
+    [handleFilesUpload, dragZone, apiKey, openRouterApiKey, model]
   );
 
   // === 全域分析 toggle handler（FileListPanel 用）===
   const handleToggleAnalysis = useCallback(() => {
-    if (!apiKey && !isAnalyzing) return; // 無金鑰時不允許啟動分析
+    const hasKey = isOpenRouterModel(model) ? !!openRouterApiKey : !!apiKey;
+    if (!hasKey && !isAnalyzing) return; // 無金鑰時不允許啟動分析
     if (isAnalyzing) {
       // 全域暫停
       handleStop();
@@ -672,7 +680,7 @@ export default function PDFExtractApp() {
         setTimeout(() => triggerQueueProcessing(), 0);
       }
     }
-  }, [isAnalyzing, apiKey, handleStop, setFiles, filesRef, triggerQueueProcessing]);
+  }, [isAnalyzing, apiKey, openRouterApiKey, model, handleStop, setFiles, filesRef, triggerQueueProcessing]);
 
   // 分界線共用的 UI 元素
   const Divider = ({ side }: { side: 'fileList' | 'left' | 'right' }) => (
@@ -801,11 +809,14 @@ export default function PDFExtractApp() {
           onSkipLastPagesChange={setSkipLastPages}
           apiKey={apiKey}
           onApiKeyChange={setApiKey}
+          openRouterApiKey={openRouterApiKey}
+          onOpenRouterApiKeyChange={setOpenRouterApiKey}
           isAnalyzing={activeFile?.status === 'processing'}
           progress={{ current: activeFile?.pageRegions?.size ?? 0, total: Math.max(1, numPages - effectiveSkipForActive) }}
           numPages={numPages}
           onReanalyze={() => {
-            if (!activeFileId || !activeFile || !apiKey) return;
+            const hasKey = isOpenRouterModel(model) ? !!openRouterApiKey : !!apiKey;
+            if (!activeFileId || !activeFile || !hasKey) return;
             // 若檔案已有券商名且在 brokerSkipMap 中有設定，優先使用券商特定值
             handleReanalyzeFile(Math.max(1, numPages - effectiveSkipForActive), activeFileId, activeFile.url);
           }}
@@ -891,7 +902,10 @@ export default function PDFExtractApp() {
                 onRegionAdd={handleRegionAdd}
                 getGlobalColorOffset={fileGetGlobalColorOffset}
                 scrollToRegionKey={isActive ? scrollTarget : null}
-                onReanalyzePage={(pageNum: number) => { if (apiKey) handleReanalyzePage(pageNum, file.id); }}
+                onReanalyzePage={(pageNum: number) => {
+                  const hasKey = isOpenRouterModel(model) ? !!openRouterApiKey : !!apiKey;
+                  if (hasKey) handleReanalyzePage(pageNum, file.id);
+                }}
                 analyzingPages={fileAnalyzingPages}
                 queuedPages={fileQueuedPages}
                 onCancelQueuedPage={(pageNum: number) => cancelQueuedPage(file.id, pageNum)}
@@ -900,7 +914,8 @@ export default function PDFExtractApp() {
                 onToggleOriginalBbox={() => setShowOriginalBbox(prev => !prev)}
                 onBboxClick={handleBboxClick}
                 onRegionDoubleClick={(page: number, regionId: number) => {
-                  if (!apiKey) return;
+                  const hasKey = isOpenRouterModel(model) ? !!openRouterApiKey : !!apiKey;
+                  if (!hasKey) return;
                   const region = file.pageRegions.get(page)?.find((r) => r.id === regionId);
                   if (region) {
                     handleRegionDoubleClick(page, region, file.id);

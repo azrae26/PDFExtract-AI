@@ -29,6 +29,8 @@ interface UseRegionRecognizeOptions {
   model: string;
   /** Gemini API 金鑰（前端使用者輸入） */
   apiKey: string;
+  /** OpenRouter API 金鑰（用於 OpenRouter 模型如 Qwen） */
+  openRouterApiKey: string;
 }
 
 export default function useRegionRecognize({
@@ -38,6 +40,7 @@ export default function useRegionRecognize({
   tablePrompt,
   model,
   apiKey,
+  openRouterApiKey,
 }: UseRegionRecognizeOptions) {
   // 獨立的識別中狀態（與批次分析的 isAnalyzing 分離）
   const [isRecognizing, setIsRecognizing] = useState(false);
@@ -79,7 +82,7 @@ export default function useRegionRecognize({
         console.log(`[useRegionRecognize][${ts}] 📐 Cropped region: ${width}x${height}px, ${sizeKB} KB`);
 
         // 送 API（含重試）
-        const result = await recognizeRegionWithRetry(base64, tablePrompt, model, page, regionId, apiKey);
+        const result = await recognizeRegionWithRetry(base64, tablePrompt, model, page, regionId, apiKey, openRouterApiKey);
 
         if (result.success && result.text) {
           updateFileRegions(targetFileId, (prev) => {
@@ -136,7 +139,7 @@ export default function useRegionRecognize({
         setIsRecognizing(false);
       }
     },
-    [pdfDocRef, tablePrompt, model, apiKey, updateFileRegions, updateFileProgress]
+    [pdfDocRef, tablePrompt, model, apiKey, openRouterApiKey, updateFileRegions, updateFileProgress]
   );
 
   return {

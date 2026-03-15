@@ -13,15 +13,21 @@
 import { useState, useRef, useEffect } from 'react';
 import { FileEntry, MetadataCandidate } from '@/lib/types';
 
-/** Gemini 模型選項 */
+/** Gemini 模型選項（含 OpenRouter 模型） */
 export const GEMINI_MODELS = [
   { id: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash', desc: '高性價比，帶思考能力' },
   { id: 'gemini-3-flash-preview', label: 'Gemini 3 Flash', desc: '最新一代，速度與品質平衡' },
   { id: 'gemini-3-pro-preview', label: 'Gemini 3 Pro', desc: '最強推理能力，旗艦模型' },
   { id: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro', desc: '進階推理與代理能力，優化版' },
+  { id: 'qwen/qwen3.5-9b', label: 'Qwen3.5-9B (OpenRouter)', desc: '多模態，高性價比 ($0.05/M)' },
 ] as const;
 
 export const DEFAULT_MODEL = 'gemini-3-flash-preview';
+
+/** 判斷是否為 OpenRouter 模型（model ID 含 "/" 即為 OpenRouter 格式） */
+export function isOpenRouterModel(modelId: string): boolean {
+  return modelId.includes('/');
+}
 
 interface PdfUploaderProps {
   prompt: string;
@@ -37,6 +43,9 @@ interface PdfUploaderProps {
   /** Gemini API 金鑰 */
   apiKey: string;
   onApiKeyChange: (key: string) => void;
+  /** OpenRouter API 金鑰（用於 OpenRouter 模型如 Qwen） */
+  openRouterApiKey: string;
+  onOpenRouterApiKeyChange: (key: string) => void;
   isAnalyzing: boolean;
   progress: { current: number; total: number };
   /** PDF 總頁數 */
@@ -95,6 +104,8 @@ export default function PdfUploader({
   onSkipLastPagesChange,
   apiKey,
   onApiKeyChange,
+  openRouterApiKey,
+  onOpenRouterApiKeyChange,
   isAnalyzing,
   progress,
   numPages,
@@ -128,6 +139,13 @@ export default function PdfUploader({
   const apiKeyPopoverElRef = useRef<HTMLDivElement>(null);
   // popover fixed 定位座標（避免被父層 overflow 截斷）
   const [apiKeyPos, setApiKeyPos] = useState<{ top: number; left: number }>({ top: 0, left: 0 });
+
+  // OpenRouter API 金鑰 popover 狀態
+  const [orKeyOpen, setOrKeyOpen] = useState(false);
+  const [orKeyInput, setOrKeyInput] = useState(openRouterApiKey);
+  const orKeyBtnRef = useRef<HTMLButtonElement>(null);
+  const orKeyPopoverElRef = useRef<HTMLDivElement>(null);
+  const [orKeyPos, setOrKeyPos] = useState<{ top: number; left: number }>({ top: 0, left: 0 });
 
   // 券商 combobox 狀態
   const [brokerInput, setBrokerInput] = useState('');
@@ -216,8 +234,9 @@ export default function PdfUploader({
     }
   }, [report]);
 
-  // 同步外部 apiKey 變化到 local input
+  // 同步外部 apiKey / openRouterApiKey 變化到 local input
   useEffect(() => { setApiKeyInput(apiKey); }, [apiKey]);
+  useEffect(() => { setOrKeyInput(openRouterApiKey); }, [openRouterApiKey]);
 
   // 點擊外部關閉下拉 / API 金鑰 popover
   useEffect(() => {
@@ -234,6 +253,12 @@ export default function PdfUploader({
       const inPopover = apiKeyPopoverElRef.current?.contains(target);
       if (!inBtn && !inPopover) {
         setApiKeyOpen(false);
+      }
+      // OpenRouter 金鑰 popover
+      const inOrBtn = orKeyBtnRef.current?.contains(target);
+      const inOrPopover = orKeyPopoverElRef.current?.contains(target);
+      if (!inOrBtn && !inOrPopover) {
+        setOrKeyOpen(false);
       }
     };
     document.addEventListener('mousedown', handler);
@@ -421,18 +446,6 @@ export default function PdfUploader({
           </div>
         )}
 
-        {/* API 金鑰未設定提示 */}
-        {!apiKey && (
-          <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg flex items-center gap-2">
-            <svg className="w-4 h-4 text-amber-500 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" />
-            </svg>
-            <p className="text-[13px] leading-5 text-amber-700">
-              請先點擊下方 <span className="font-medium">🔑 金鑰按鈕</span> 設定 Gemini API Key
-            </p>
-          </div>
-        )}
-
         {/* 錯誤訊息 */}
         {error && (
           <div className="p-3 bg-red-50 border border-red-200 rounded-lg">
@@ -535,31 +548,88 @@ export default function PdfUploader({
               </svg>
             </div>
           </div>
-          {/* API 金鑰按鈕 */}
-          <div className="flex-shrink-0">
-            <button
-              ref={apiKeyBtnRef}
-              type="button"
-              onClick={() => {
-                if (!apiKeyOpen && apiKeyBtnRef.current) {
-                  const rect = apiKeyBtnRef.current.getBoundingClientRect();
-                  setApiKeyPos({ top: rect.bottom + 4, left: rect.left });
-                }
-                setApiKeyOpen((p) => !p);
-              }}
-              className={`w-[34px] h-[34px] flex items-center justify-center border rounded-lg transition-colors cursor-pointer ${
-                apiKey
-                  ? 'border-green-300 bg-green-50 text-green-600 hover:bg-green-100'
-                  : 'border-red-300 bg-red-50 text-red-500 hover:bg-red-100'
-              }`}
-              title={apiKey ? 'API 金鑰已設定' : '請設定 API 金鑰'}
-            >
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} style={{ transform: 'scaleX(-1)' }}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 5.25a3 3 0 013 3m3 0a6 6 0 01-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1121.75 8.25z" />
+          {/* Gemini API 金鑰按鈕（僅非 OpenRouter 模型顯示） */}
+          {!isOpenRouterModel(model) && (
+            <div className="flex-shrink-0">
+              <button
+                ref={apiKeyBtnRef}
+                type="button"
+                onClick={() => {
+                  if (!apiKeyOpen && apiKeyBtnRef.current) {
+                    const rect = apiKeyBtnRef.current.getBoundingClientRect();
+                    setApiKeyPos({ top: rect.bottom + 4, left: rect.left });
+                  }
+                  setApiKeyOpen((p) => !p);
+                }}
+                className={`w-[34px] h-[34px] flex items-center justify-center border rounded-lg transition-colors cursor-pointer ${
+                  apiKey
+                    ? 'border-green-300 bg-green-50 text-green-600 hover:bg-green-100'
+                    : 'border-red-300 bg-red-50 text-red-500 hover:bg-red-100'
+                }`}
+                title={apiKey ? 'Gemini API 金鑰已設定' : '請設定 Gemini API 金鑰'}
+              >
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} style={{ transform: 'scaleX(-1)' }}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 5.25a3 3 0 013 3m3 0a6 6 0 01-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1121.75 8.25z" />
+                </svg>
+              </button>
+            </div>
+          )}
+          {/* OpenRouter API 金鑰按鈕（僅 OpenRouter 模型顯示） */}
+          {isOpenRouterModel(model) && (
+            <div className="flex-shrink-0">
+              <button
+                ref={orKeyBtnRef}
+                type="button"
+                onClick={() => {
+                  if (!orKeyOpen && orKeyBtnRef.current) {
+                    const rect = orKeyBtnRef.current.getBoundingClientRect();
+                    setOrKeyPos({ top: rect.bottom + 4, left: rect.left });
+                  }
+                  setOrKeyOpen((p) => !p);
+                }}
+                className={`w-[34px] h-[34px] flex items-center justify-center border rounded-lg transition-colors cursor-pointer ${
+                  openRouterApiKey
+                    ? 'border-green-300 bg-green-50 text-green-600 hover:bg-green-100'
+                    : 'border-red-300 bg-red-50 text-red-500 hover:bg-red-100'
+                }`}
+                title={openRouterApiKey ? 'OpenRouter API 金鑰已設定' : '請設定 OpenRouter API 金鑰'}
+              >
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} style={{ transform: 'scaleX(-1)' }}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 5.25a3 3 0 013 3m3 0a6 6 0 01-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1121.75 8.25z" />
+                </svg>
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* API 金鑰未設定提示（依目前選擇的模型顯示對應提示） */}
+        {isOpenRouterModel(model) ? (
+          !openRouterApiKey && (
+            <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg flex items-center gap-2">
+              <svg className="w-4 h-4 text-amber-500 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" />
               </svg>
-            </button>
-          </div>
-          <div className="w-14 flex-shrink-0">
+              <p className="text-[13px] leading-5 text-amber-700">
+                請先點擊上方 🔑 按鈕設定 OpenRouter API Key
+              </p>
+            </div>
+          )
+        ) : (
+          !apiKey && (
+            <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg flex items-center gap-2">
+              <svg className="w-4 h-4 text-amber-500 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" />
+              </svg>
+              <p className="text-[13px] leading-5 text-amber-700">
+                請先點擊下方 <span className="font-medium">🔑 金鑰按鈕</span> 設定 Gemini API Key
+              </p>
+            </div>
+          )
+        )}
+
+        {/* 並行分析數 + 忽略末尾頁數 */}
+        <div className="flex gap-2 items-end">
+          <div className="flex-1">
             <label className="text-[11px] leading-4 font-medium text-gray-500 mb-1.5 block whitespace-nowrap">並行分析數</label>
             <input
               type="number"
@@ -570,10 +640,10 @@ export default function PdfUploader({
                 const v = parseInt(e.target.value, 10);
                 if (!isNaN(v) && v >= 1) onBatchSizeChange(Math.min(v, 50));
               }}
-              className="w-full pl-4 px-1.5 py-1.5 text-[13px] leading-5 text-center border border-gray-300 rounded-lg bg-gray-50 text-gray-800 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-transparent"
+              className="w-full px-2.5 py-1.5 text-[13px] leading-5 border border-gray-300 rounded-lg bg-gray-50 text-gray-800 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-transparent"
             />
           </div>
-          <div className="w-[66px] flex-shrink-0">
+          <div className="flex-1">
             <label className="text-[11px] leading-4 font-medium text-gray-500 mb-1.5 block whitespace-nowrap">忽略末尾頁數</label>
             <input
               type="number"
@@ -584,7 +654,7 @@ export default function PdfUploader({
                 const v = parseInt(e.target.value, 10);
                 if (!isNaN(v) && v >= 0) onSkipLastPagesChange(v);
               }}
-              className="w-full pl-4 px-1.5 py-1.5 text-[13px] leading-5 text-center border border-gray-300 rounded-lg bg-gray-50 text-gray-800 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-transparent"
+              className="w-full px-2.5 py-1.5 text-[13px] leading-5 border border-gray-300 rounded-lg bg-gray-50 text-gray-800 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-transparent"
             />
           </div>
         </div>
@@ -659,7 +729,7 @@ export default function PdfUploader({
               onKeyDown={(e) => { if (e.key === 'Enter' && isNewBroker) handleAddBroker(); }}
               disabled={!brokerInput.trim()}
               placeholder="—"
-              className="w-full px-1.5 py-1.5 text-[13px] leading-5 text-center border border-gray-300 rounded-lg bg-white text-gray-800 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-transparent disabled:bg-gray-100 disabled:text-gray-400"
+              className="w-full px-2.5 py-1.5 text-[13px] leading-5 border border-gray-300 rounded-lg bg-white text-gray-800 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-transparent disabled:bg-gray-100 disabled:text-gray-400"
             />
           </div>
           {/* 新增(+) / 刪除(✕) 按鈕 — 依券商是否已存在切換 */}
@@ -719,7 +789,7 @@ export default function PdfUploader({
         </button>
       </div>
 
-      {/* API 金鑰 popover（fixed 定位，避免被父層 overflow 截斷） */}
+      {/* Gemini API 金鑰 popover（fixed 定位，避免被父層 overflow 截斷） */}
       {apiKeyOpen && (
         <div
           className="fixed z-[9999] w-72 bg-white border border-gray-300 rounded-lg shadow-lg p-3"
@@ -764,6 +834,63 @@ export default function PdfUploader({
                 onApiKeyChange('');
                 setApiKeyInput('');
                 setApiKeyOpen(false);
+              }}
+              className="mt-2 text-[11px] text-red-500 hover:text-red-700 cursor-pointer"
+            >
+              清除金鑰
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* OpenRouter API 金鑰 popover（fixed 定位，避免被父層 overflow 截斷） */}
+      {orKeyOpen && (
+        <div
+          className="fixed z-[9999] w-80 bg-white border border-gray-300 rounded-lg shadow-lg p-3"
+          style={{ top: orKeyPos.top, left: orKeyPos.left }}
+          ref={orKeyPopoverElRef}
+        >
+          <label className="text-[11px] leading-4 font-medium text-gray-500 mb-1.5 block">OpenRouter API 金鑰</label>
+          <p className="text-[11px] text-gray-400 mb-1.5">
+            至 <a href="https://openrouter.ai/keys" target="_blank" rel="noopener noreferrer" className="text-indigo-500 underline">openrouter.ai/keys</a> 建立金鑰（格式：sk-or-v1-...）
+          </p>
+          <div className="flex gap-1.5">
+            <input
+              type="password"
+              autoComplete="one-time-code"
+              data-form-type="other"
+              data-1p-ignore
+              data-lpignore="true"
+              value={orKeyInput}
+              onChange={(e) => setOrKeyInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  onOpenRouterApiKeyChange(orKeyInput.trim());
+                  setOrKeyOpen(false);
+                }
+              }}
+              placeholder="sk-or-v1-..."
+              className="flex-1 min-w-0 px-2.5 py-1.5 text-[13px] border border-gray-300 rounded-lg bg-white text-gray-800 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-transparent"
+              autoFocus
+            />
+            <button
+              type="button"
+              onClick={() => {
+                onOpenRouterApiKeyChange(orKeyInput.trim());
+                setOrKeyOpen(false);
+              }}
+              className="px-2.5 py-1.5 text-[13px] font-medium text-white bg-blue-500 rounded-lg hover:bg-blue-600 cursor-pointer flex-shrink-0"
+            >
+              儲存
+            </button>
+          </div>
+          {openRouterApiKey && (
+            <button
+              type="button"
+              onClick={() => {
+                onOpenRouterApiKeyChange('');
+                setOrKeyInput('');
+                setOrKeyOpen(false);
               }}
               className="mt-2 text-[11px] text-red-500 hover:text-red-700 cursor-pointer"
             >
