@@ -174,11 +174,12 @@ export default function TextPanel({
   }, [editingRegionKey, editText]);
 
   // === 拖曳排序狀態 ===
+  // insertAt：插入點位置（0=最前，n=最後），游標在 card 上半 → insertAt=index，下半 → insertAt=index+1
 
   const [dragState, setDragState] = useState<{
     page: number;
     dragIndex: number;
-    overIndex: number;
+    insertAt: number;
   } | null>(null);
 
   // === 自動滾動：PdfViewer 點擊/hover BoundingBox → 右欄滾動到對應文字框 ===
@@ -396,14 +397,15 @@ export default function TextPanel({
 
   // === 拖曳排序 handlers ===
   const handleDragStart = useCallback((page: number, index: number) => {
-    setDragState({ page, dragIndex: index, overIndex: index });
+    setDragState({ page, dragIndex: index, insertAt: index });
   }, []);
 
   const handleDragOver = useCallback((page: number, index: number, e: React.DragEvent) => {
     e.preventDefault();
-    if (dragState && dragState.page === page) {
-      setDragState((prev) => prev ? { ...prev, overIndex: index } : null);
-    }
+    if (!dragState || dragState.page !== page) return;
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const insertAt = e.clientY < rect.top + rect.height / 2 ? index : index + 1;
+    setDragState((prev) => prev ? { ...prev, insertAt } : null);
   }, [dragState]);
 
   const handleDragEnd = useCallback((page: number, regions: Region[]) => {
@@ -411,11 +413,14 @@ export default function TextPanel({
       setDragState(null);
       return;
     }
-    const { dragIndex, overIndex } = dragState;
-    if (dragIndex !== overIndex) {
+    const { dragIndex, insertAt } = dragState;
+    // insertAt === dragIndex 或 dragIndex+1 代表位置不變（插入點緊鄰被拖曳元素）
+    if (insertAt !== dragIndex && insertAt !== dragIndex + 1) {
       const reordered = [...regions];
       const [moved] = reordered.splice(dragIndex, 1);
-      reordered.splice(overIndex, 0, moved);
+      // 移除被拖曳元素後，insertAt > dragIndex 時插入點索引需減 1
+      const adjustedInsert = insertAt > dragIndex ? insertAt - 1 : insertAt;
+      reordered.splice(adjustedInsert, 0, moved);
       onReorderRegions(page, reordered);
     }
     setDragState(null);
@@ -537,12 +542,23 @@ export default function TextPanel({
                   const color = isEmpty ? EMPTY_BOX_COLOR : getBoxColor(globalIndex);
                   const isHovered = hoveredRegionId === regionKey;
                   const isDragging = dragState?.page === page && dragState.dragIndex === index;
-                  const isDropTarget = dragState?.page === page && dragState.overIndex === index && dragState.dragIndex !== index;
+                  // 插入線：顯示在 index 前方；排除 dragIndex 及 dragIndex+1（位置不變的 no-op 情況）
+                  const showInsertLineBefore =
+                    dragState?.page === page &&
+                    dragState.insertAt === index &&
+                    dragState.insertAt !== dragState.dragIndex &&
+                    dragState.insertAt !== dragState.dragIndex + 1;
                   globalIndex++;
 
                   return (
+                    <React.Fragment key={regionKey}>
+                      {showInsertLineBefore && (
+                        <div className="flex items-center gap-1 px-1 pointer-events-none select-none" style={{ margin: '2px 0' }}>
+                          <div className="w-2 h-2 rounded-full bg-blue-400 flex-shrink-0" />
+                          <div className="flex-1 h-0.5 bg-blue-400 rounded-full" />
+                        </div>
+                      )}
                     <div
-                      key={regionKey}
                       ref={(el) => {
                         if (el) regionRefs.current.set(regionKey, el);
                         else regionRefs.current.delete(regionKey);
@@ -553,7 +569,7 @@ export default function TextPanel({
                       onDragEnd={() => handleDragEnd(page, regions)}
                       className={`relative rounded-lg p-3 transition-all duration-150 cursor-pointer border group animate-region-in ${
                         isHovered ? 'shadow-md' : 'shadow-sm'
-                      } ${isDragging ? 'opacity-40' : ''} ${isDropTarget ? 'ring-2 ring-blue-400' : ''}`}
+                      } ${isDragging ? 'opacity-40' : ''}`}
                       style={{
                         backgroundColor: isHovered ? color.hoverBg : color.textBg,
                         borderColor: isHovered ? color.border : 'transparent',
@@ -986,8 +1002,18 @@ export default function TextPanel({
                         </span>
                       </div>
                     </div>
+                    </React.Fragment>
                   );
                 })}
+                {/* 插入線：游標在最後一個 card 下半時，顯示在列表末尾 */}
+                {dragState?.page === page &&
+                  dragState.insertAt === regions.length &&
+                  dragState.insertAt !== dragState.dragIndex + 1 && (
+                    <div className="flex items-center gap-1 px-1 pointer-events-none select-none" style={{ margin: '2px 0' }}>
+                      <div className="w-2 h-2 rounded-full bg-blue-400 flex-shrink-0" />
+                      <div className="flex-1 h-0.5 bg-blue-400 rounded-full" />
+                    </div>
+                  )}
               </div>
             );
           })
