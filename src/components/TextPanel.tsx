@@ -879,18 +879,20 @@ export default function TextPanel({
                                               <td
                                                 key={ci}
                                                 className="border-b border-r border-gray-200 px-2 py-1 text-gray-800 align-top cursor-text min-w-[40px]"
-                                                onClick={(e) => {
-                                                  e.stopPropagation();
-                                                  if (e.detail >= 2) return;
-                                                  const cellKey = `${regionKey}-${si}-r-${ri}-${ci}`;
-                                                  const existing = textClickTimerRef.current.get(cellKey);
-                                                  if (existing) clearTimeout(existing);
-                                                  const timer = setTimeout(() => {
-                                                    textClickTimerRef.current.delete(cellKey);
-                                                    enterTableEditMode(regionKey, segments, `${si}-r-${ri}-${ci}`);
-                                                  }, 200);
-                                                  textClickTimerRef.current.set(cellKey, timer);
-                                                }}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  if (e.detail >= 2) return;
+                                  // 立即觸發 PDF 滾動，不等雙擊確認
+                                  onClickRegion(regionKey);
+                                  const cellKey = `${regionKey}-${si}-r-${ri}-${ci}`;
+                                  const existing = textClickTimerRef.current.get(cellKey);
+                                  if (existing) clearTimeout(existing);
+                                  const timer = setTimeout(() => {
+                                    textClickTimerRef.current.delete(cellKey);
+                                    enterTableEditMode(regionKey, segments, `${si}-r-${ri}-${ci}`);
+                                  }, 200);
+                                  textClickTimerRef.current.set(cellKey, timer);
+                                }}
                                               >
                                                 {cell}
                                               </td>
@@ -940,6 +942,8 @@ export default function TextPanel({
                               e.stopPropagation();
                               // 雙擊的第二下 click（e.detail >= 2）由 onDoubleClick 處理，這裡略過
                               if (e.detail >= 2) return;
+                              // 立即觸發 PDF 滾動，不等雙擊確認
+                              onClickRegion(regionKey);
                               // 延遲進入編輯，讓雙擊有機會取消
                               const existing = textClickTimerRef.current.get(regionKey);
                               if (existing) clearTimeout(existing);

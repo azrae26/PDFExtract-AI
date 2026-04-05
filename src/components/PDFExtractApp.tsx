@@ -122,9 +122,7 @@ export default function PDFExtractApp() {
 
   const [currentPage, setCurrentPage] = useState(1);
   const [hoveredRegionId, setHoveredRegionId] = useState<string | null>(null);
-  /** 右欄點文字 → 中欄 PDF 滾動（requestId 遞增以便同 key 重複觸發，避免 null+rAF 雙提交延遲） */
-  const pdfScrollRequestIdRef = useRef(0);
-  const [scrollToPdfRegion, setScrollToPdfRegion] = useState<{ key: string; requestId: number } | null>(null);
+  const [scrollTarget, setScrollTarget] = useState<string | null>(null);
   /** Hover PdfViewer 的 BoundingBox → 讓 TextPanel 滾動到對應文字框 */
   const [scrollToTextKey, setScrollToTextKey] = useState<string | null>(null);
   /** 切換顯示校正前/校正後 bbox（全域，跨檔案共享） */
@@ -292,7 +290,7 @@ export default function PDFExtractApp() {
 
   // === 切換活躍檔案 ===
   const handleSelectFile = useCallback((fileId: string) => {
-    setScrollToPdfRegion(null); // 清除前一個檔案的滾動目標，避免新檔案繼承舊的滾動請求
+    setScrollTarget(null); // 清除前一個檔案的滾動目標，避免新檔案繼承舊的 scrollIntoView 位置
     setHoveredRegionId(null); // 清除 hover 狀態，避免切換後殘留高亮
     setActiveFileId(fileId);
     setCurrentPage(1);
@@ -587,8 +585,8 @@ export default function PDFExtractApp() {
 
   // === 點擊文字框 → 滾動 PDF 到對應框 ===
   const handleClickRegion = useCallback((regionKey: string) => {
-    pdfScrollRequestIdRef.current += 1;
-    setScrollToPdfRegion({ key: regionKey, requestId: pdfScrollRequestIdRef.current });
+    setScrollTarget(null);
+    requestAnimationFrame(() => setScrollTarget(regionKey));
   }, []);
 
   // === Hover PdfViewer 的 BoundingBox → 滾動 TextPanel 到對應文字框 ===
@@ -917,7 +915,7 @@ export default function PDFExtractApp() {
                 onRegionRemove={handleRegionRemove}
                 onRegionAdd={handleRegionAdd}
                 getGlobalColorOffset={fileGetGlobalColorOffset}
-                scrollToPdfRegion={isActive ? scrollToPdfRegion : null}
+                scrollToRegionKey={isActive ? scrollTarget : null}
                 onReanalyzePage={(pageNum: number) => {
                   const hasKey = isOpenRouterModel(model) ? !!openRouterApiKey : !!apiKey;
                   if (hasKey) handleReanalyzePage(pageNum, file.id);
