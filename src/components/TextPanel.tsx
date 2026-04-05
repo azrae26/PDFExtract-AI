@@ -731,7 +731,7 @@ export default function TextPanel({
                                         }}
                                         contentEditable
                                         suppressContentEditableWarning
-                                        className="w-full text-gray-800 leading-relaxed focus:outline-none"
+                                        className="w-full text-gray-800 leading-relaxed focus:outline-none whitespace-pre-wrap"
                                         style={{ fontSize: curFontSize }}
                                         onClick={(e) => e.stopPropagation()}
                                         onKeyDown={cellKeyDown}
