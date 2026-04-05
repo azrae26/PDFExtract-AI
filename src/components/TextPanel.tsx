@@ -286,11 +286,7 @@ export default function TextPanel({
     };
   }, [scrollToRegionKey, scrollToRegion]);
 
-  // 路徑 2：Hover PdfViewer BoundingBox → 右欄自動滾到對應文字框（滑鼠在 TextPanel 上時跳過，避免迴圈）
-  useEffect(() => {
-    if (!hoveredRegionId || skipScrollRef.current) return;
-    scrollToRegion(hoveredRegionId);
-  }, [hoveredRegionId, scrollToRegion]);
+  // 路徑 2（已移除）：Hover PdfViewer BoundingBox 不再自動滾動右欄，僅點擊才觸發滾動
 
 
   // 複製全部文字到剪貼簿
@@ -317,12 +313,14 @@ export default function TextPanel({
   // === 文字編輯 handlers ===
 
   const enterTextEdit = useCallback((regionKey: string, text: string) => {
+    onClickRegion(regionKey);
     setEditingRegionKey(regionKey);
     setEditText(text);
     setEditingTableData(null);
-  }, []);
+  }, [onClickRegion]);
 
   const enterTableEditMode = useCallback((regionKey: string, segments: Segment[], focusCellKey?: string) => {
+    onClickRegion(regionKey);
     editCellRefs.current.clear();
     tableEscapeRef.current = false;
     pendingFocusCellRef.current = focusCellKey ?? null;
@@ -334,7 +332,7 @@ export default function TextPanel({
     setEditingTableData({ regionKey, segments: copy });
     setEditingRegionKey(regionKey);
     setEditText('');
-  }, []);
+  }, [onClickRegion]);
 
   // re-render 後自動 focus 使用者點擊的那個 cell
   useEffect(() => {
@@ -768,7 +766,7 @@ export default function TextPanel({
                                         )}
                                         <tbody>
                                           {seg.rows.map((row, ri) => (
-                                            <tr key={ri} className={ri % 2 === 1 ? 'bg-gray-50/60' : 'bg-white'}>
+                                            <tr key={ri} className={ri % 2 === 1 ? 'bg-gray-100/70' : 'bg-white'}>
                                               {row.map((cell, ci) => (
                                                 <td
                                                   key={ci}
@@ -839,7 +837,7 @@ export default function TextPanel({
                                       )}
                                       <tbody>
                                         {seg.rows.map((row, ri) => (
-                                          <tr key={ri} className={ri % 2 === 1 ? 'bg-gray-50/60' : 'bg-white'}>
+                                          <tr key={ri} className={ri % 2 === 1 ? 'bg-gray-100/70' : 'bg-white'}>
                                             {row.map((cell, ci) => (
                                               <td
                                                 key={ci}
