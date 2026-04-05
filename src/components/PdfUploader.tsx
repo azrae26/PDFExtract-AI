@@ -6,6 +6,7 @@
  *
  * 注意：PDF 上傳功能已移至全頁面拖放（PDFExtractApp），此面板不再處理檔案上傳
  * 注意：isAnalyzing 語意為活躍檔案是否在跑（activeFile.status === 'processing'），非全域分析狀態
+ * 注意：日期/股票代號/券商名候選 chip 按鈕帶 id：`meta-chip-{date|code|broker}-{selected|unselected}-{idx}`，供外部自動化識別
  */
 
 'use client';
@@ -317,6 +318,7 @@ export default function PdfUploader({
                 return (
                   <button
                     key={`${candidate.value}-${candidate.source}-${idx}`}
+                    id={`meta-chip-${field}-${isSelected ? 'selected' : 'unselected'}-${idx}`}
                     type="button"
                     onClick={(e) => { e.stopPropagation(); onSelectMetadata(field, candidate.value); }}
                     className={`inline-flex items-center px-1.5 py-[2px] text-[12px] rounded-md transition-colors cursor-pointer whitespace-nowrap flex-shrink-0 ${
