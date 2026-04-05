@@ -980,18 +980,22 @@ export default function PdfViewer({
       )}
 
       {/* 左下角快捷鍵說明（小圈 hover 顯示） */}
-      <div className="absolute bottom-2 left-2 z-30 group">
-        <div className="w-[31px] h-[31px] rounded-full bg-indigo-500 hover:bg-indigo-600 text-white flex items-center justify-center text-base font-bold cursor-help shadow-md">
+      <div className="absolute bottom-2 left-[4px] z-30 group">
+        <div className="w-[29px] h-[29px] rounded-full bg-indigo-500 hover:bg-indigo-600 text-white flex items-center justify-center text-base font-bold cursor-help shadow-md">
           ?
         </div>
         <div className="absolute left-0 bottom-full mb-1 hidden group-hover:block w-max max-w-[200px] p-2 rounded bg-gray-800/95 text-white text-xs leading-relaxed shadow-lg">
           <div className="font-semibold mb-1.5">快捷鍵（滑鼠指到某頁）</div>
+          <div>E：上一個 檔案</div>
+          <div>D：下一個 檔案</div>
           <div>Space：下一頁</div>
           <div>S 或 W：上一頁</div>
-          <div>Ctrl×2：重跑該頁</div>
-          <div>Alt×2：刪除該頁框</div>
-          <div className="mt-1.5 pt-1.5 border-t border-gray-600">E：上一個檔案</div>
-          <div>D：下一個檔案</div>
+          <div>Ctrl ×2：重跑 該頁</div>
+          <div>Alt ×2：刪除 該頁的框</div>
+          <div className="mt-1.5 pt-1.5 border-t border-gray-600 font-semibold mb-1">滑鼠操作</div>
+          <div>空白處拖 曳：畫新框</div>
+          <div>左鍵 雙擊框：AI 重新辨識</div>
+          <div>右鍵 雙擊框：刪除框</div>
         </div>
       </div>
     </div>

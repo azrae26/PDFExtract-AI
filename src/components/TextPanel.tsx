@@ -428,7 +428,7 @@ export default function TextPanel({
   let globalIndex = 0;
 
   return (
-    <div className="w-full h-full flex flex-col border-l border-gray-200 bg-white overflow-hidden">
+    <div className="relative w-full h-full flex flex-col border-l border-gray-200 bg-white">
       {/* 標題列 */}
       <div className="flex items-center justify-between px-4 h-11 border-b border-gray-200 bg-gray-50 flex-shrink-0">
         <h2 className="text-sm font-semibold text-gray-700">提取文字</h2>
@@ -992,6 +992,20 @@ export default function TextPanel({
             );
           })
         )}
+      </div>
+
+      {/* 左下角操作說明（小圈 hover 顯示） */}
+      <div className="absolute bottom-2 left-[-2px] z-30 group">
+        <div className="w-[29px] h-[29px] rounded-full bg-indigo-500 hover:bg-indigo-600 text-white flex items-center justify-center text-base font-bold cursor-help shadow-md">
+          ?
+        </div>
+        <div className="absolute left-0 bottom-full mb-1 hidden group-hover:block w-max max-w-[200px] p-2 rounded bg-gray-800/95 text-white text-xs leading-relaxed shadow-lg">
+          <div className="font-semibold mb-1.5">操作說明</div>
+          <div>雙擊 卡片：複製文字</div>
+          <div>右鍵 雙擊：刪除區域</div>
+          <div>單擊 文字：進入編輯</div>
+          <div>拖曳 卡片標題：調整排序</div>
+        </div>
       </div>
     </div>
   );
