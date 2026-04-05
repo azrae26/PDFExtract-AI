@@ -478,6 +478,22 @@ export default function PDFExtractApp() {
     });
   }, [updateActiveFileRegions]);
 
+  // === 使用者手動編輯 region 文字 ===
+  const handleRegionTextChange = useCallback((page: number, regionId: number, newText: string) => {
+    updateActiveFileRegions((prev) => {
+      const updated = new Map(prev);
+      const regions = updated.get(page);
+      if (regions) {
+        updated.set(page, regions.map((r) =>
+          r.id === regionId ? { ...r, text: newText, userModified: true } : r
+        ));
+      }
+      return updated;
+    });
+    const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
+    console.log(`[PDFExtractApp][${ts}] ✏️ Region ${regionId} text edited on page ${page}`);
+  }, [updateActiveFileRegions]);
+
   // === 匯出報告：組合提取文字內容 ===
   const buildExportContent = (pageRegionsMap: Map<number, Region[]>): string => {
     const lines: string[] = [];
@@ -940,6 +956,7 @@ export default function PDFExtractApp() {
           onClickRegion={handleClickRegion}
           onRegionRemove={handleRegionRemove}
           onReorderRegions={handleReorderRegions}
+          onRegionTextChange={handleRegionTextChange}
           scrollToRegionKey={scrollToTextKey}
           onExportReport={handleExportSingle}
           exportState={exportSingleState}
