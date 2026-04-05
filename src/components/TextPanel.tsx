@@ -1,7 +1,8 @@
 /**
  * 功能：右側文字面板
  * 職責：顯示所有頁面的分析文字，按頁碼+順序排列，支援 hover 高亮互動、複製全文、
- *       刪除單一區域（同步刪除中間欄框）、拖曳調整同頁區域順序
+ *       刪除單一區域（同步刪除中間欄框）、拖曳調整同頁區域順序、
+ *       Markdown 表格自動渲染（可切換回原始 MD）、per-region 字型大小調整
  * 依賴：types.ts、constants.ts
  */
 
@@ -10,6 +11,75 @@
 import React, { useRef, useEffect, useCallback, useState } from 'react';
 import { Region } from '@/lib/types';
 import { getBoxColor, EMPTY_BOX_COLOR } from '@/lib/constants';
+
+// ── Markdown 表格解析 ──────────────────────────────────────────────────────
+
+type TextSegment = { type: 'text'; content: string };
+type TableSegment = { type: 'table'; headers: string[]; rows: string[][] };
+type Segment = TextSegment | TableSegment;
+
+const SEPARATOR_RE = /^\|?(\s*:?-+:?\s*\|)+\s*:?-+:?\s*\|?$/;
+
+function hasMarkdownTable(text: string): boolean {
+  const lines = text.split('\n');
+  const hasPipe = lines.some((l) => l.includes('|'));
+  const hasSep = lines.some((l) => SEPARATOR_RE.test(l.trim()));
+  return hasPipe && hasSep;
+}
+
+function parseCells(line: string): string[] {
+  return line
+    .replace(/^\|/, '')
+    .replace(/\|$/, '')
+    .split('|')
+    .map((c) => c.trim());
+}
+
+function parseTextSegments(text: string): Segment[] {
+  const lines = text.split('\n');
+  const segments: Segment[] = [];
+  let i = 0;
+
+  while (i < lines.length) {
+    // 嘗試找表格起點：含 | 且下一行是分隔行
+    if (
+      lines[i].includes('|') &&
+      i + 1 < lines.length &&
+      SEPARATOR_RE.test(lines[i + 1].trim())
+    ) {
+      const headers = parseCells(lines[i]);
+      i += 2; // 跳過 header 行 + 分隔行
+      const rows: string[][] = [];
+      while (i < lines.length && lines[i].includes('|')) {
+        rows.push(parseCells(lines[i]));
+        i++;
+      }
+      segments.push({ type: 'table', headers, rows });
+    } else {
+      // 收集連續的非表格行
+      const textLines: string[] = [];
+      while (
+        i < lines.length &&
+        !(
+          lines[i].includes('|') &&
+          i + 1 < lines.length &&
+          SEPARATOR_RE.test(lines[i + 1].trim())
+        )
+      ) {
+        textLines.push(lines[i]);
+        i++;
+      }
+      const content = textLines.join('\n').trim();
+      if (content) segments.push({ type: 'text', content });
+    }
+  }
+
+  return segments;
+}
+
+const DEFAULT_FONT_SIZE = 13;
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 interface TextPanelProps {
   pageRegions: Map<number, Region[]>;
@@ -53,6 +123,12 @@ export default function TextPanel({
   // === 複製成功提示 ===
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [copiedAll, setCopiedAll] = useState(false);
+
+  // === Markdown 表格切換（per-region：在 set 中 = 顯示原始 MD）===
+  const [rawMarkdownRegions, setRawMarkdownRegions] = useState<Set<string>>(new Set());
+
+  // === per-region 字型大小（未設定時 fallback DEFAULT_FONT_SIZE）===
+  const [fontSizes, setFontSizes] = useState<Map<string, number>>(new Map());
 
   // === 雙擊右鍵刪除 ===
   const lastRightClickRef = useRef<{ key: string; time: number }>({ key: '', time: 0 });
@@ -414,38 +490,168 @@ export default function TextPanel({
                         ⠿
                       </div>
 
-                      {/* 區域標籤 */}
-                      {region.label && (
-                        <div className="flex items-center gap-1.5 mb-1.5">
-                          <span
-                            className="w-2.5 h-2.5 rounded-full flex-shrink-0"
-                            style={{ backgroundColor: color.border }}
-                          />
-                          <span className="text-xs font-medium text-gray-600 truncate">
-                            {region.label}
-                          </span>
-                        </div>
-                      )}
+                      {/* 區域標籤列（含字型大小 +/- 及表格切換按鈕） */}
+                      {(() => {
+                        const curFontSize = fontSizes.get(regionKey) ?? DEFAULT_FONT_SIZE;
+                        const hasTable = !isEmpty && !!region.text && hasMarkdownTable(region.text);
+                        const isRawMd = rawMarkdownRegions.has(regionKey);
+
+                        const adjustFont = (delta: number, e: React.MouseEvent) => {
+                          e.stopPropagation();
+                          setFontSizes((prev) => {
+                            const next = new Map(prev);
+                            next.set(regionKey, Math.min(24, Math.max(8, curFontSize + delta)));
+                            return next;
+                          });
+                        };
+
+                        const toggleMd = (e: React.MouseEvent) => {
+                          e.stopPropagation();
+                          setRawMarkdownRegions((prev) => {
+                            const next = new Set(prev);
+                            if (next.has(regionKey)) next.delete(regionKey);
+                            else next.add(regionKey);
+                            return next;
+                          });
+                        };
+
+                        return (
+                          <div className="flex items-center gap-1.5 mb-1.5 min-h-[18px]">
+                            {/* 標籤圓點 + 文字 */}
+                            {region.label && (
+                              <>
+                                <span
+                                  className="w-2.5 h-2.5 rounded-full flex-shrink-0"
+                                  style={{ backgroundColor: color.border }}
+                                />
+                                <span className="text-xs font-medium text-gray-600 truncate flex-1">
+                                  {region.label}
+                                </span>
+                              </>
+                            )}
+                            {!region.label && <span className="flex-1" />}
+
+                            {/* 字型大小 − size + */}
+                            <div className="flex items-center gap-0.5 flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
+                              <button
+                                className="w-4 h-4 rounded flex items-center justify-center text-gray-400 hover:bg-gray-200 text-[11px] leading-none cursor-pointer"
+                                onClick={(e) => adjustFont(-0.5, e)}
+                                title="縮小文字"
+                              >−</button>
+                              <span className="text-[11px] text-gray-400 w-9 text-center select-none">
+                                {curFontSize % 1 === 0 ? curFontSize : curFontSize.toFixed(1)}px
+                              </span>
+                              <button
+                                className="w-4 h-4 rounded flex items-center justify-center text-gray-400 hover:bg-gray-200 text-[11px] leading-none cursor-pointer"
+                                onClick={(e) => adjustFont(0.5, e)}
+                                title="放大文字"
+                              >+</button>
+                            </div>
+
+                            {/* MD ↔ 表格切換按鈕（僅有表格時顯示） */}
+                            {hasTable && (
+                              <button
+                                className="flex-shrink-0 text-[11px] px-1.5 py-0.5 rounded border border-gray-300 text-gray-500 hover:bg-gray-100 leading-none cursor-pointer opacity-0 group-hover:opacity-100 transition-opacity"
+                                onClick={toggleMd}
+                                title={isRawMd ? '切換到表格視圖' : '切換到原始 Markdown'}
+                              >
+                                {isRawMd ? '表格' : 'MD'}
+                              </button>
+                            )}
+                          </div>
+                        );
+                      })()}
+
                       {/* 文字內容 */}
-                      {isEmpty ? (
-                        <p className="text-[13px] text-gray-400 leading-relaxed italic">
-                          （無文字）
-                        </p>
-                      ) : region.text?.startsWith('⏳') ? (
-                        <p className="text-[13px] text-blue-600 leading-relaxed flex items-center gap-1.5">
-                          <span className="inline-block animate-hourglass text-[13px]">⏳</span>
-                          {region.text.slice(1).trim()}
-                        </p>
-                      ) : (
-                        <p className="text-[13px] text-gray-800 leading-relaxed break-words">
-                          {region.text?.split('\n').map((line, i, arr) => (
-                            <React.Fragment key={i}>
-                              {line}
-                              {i < arr.length - 1 && <br />}
-                            </React.Fragment>
-                          ))}
-                        </p>
-                      )}
+                      {(() => {
+                        const curFontSize = fontSizes.get(regionKey) ?? DEFAULT_FONT_SIZE;
+                        const hasTable = !isEmpty && !!region.text && hasMarkdownTable(region.text);
+                        const isRawMd = rawMarkdownRegions.has(regionKey);
+
+                        if (isEmpty) {
+                          return (
+                            <p className="text-gray-400 leading-relaxed italic" style={{ fontSize: curFontSize }}>
+                              （無文字）
+                            </p>
+                          );
+                        }
+                        if (region.text?.startsWith('⏳')) {
+                          return (
+                            <p className="text-blue-600 leading-relaxed flex items-center gap-1.5" style={{ fontSize: curFontSize }}>
+                              <span className="inline-block animate-hourglass" style={{ fontSize: curFontSize }}>⏳</span>
+                              {region.text.slice(1).trim()}
+                            </p>
+                          );
+                        }
+                        if (hasTable && !isRawMd) {
+                          // 渲染為 HTML 表格
+                          const segments = parseTextSegments(region.text ?? '');
+                          return (
+                            <div className="space-y-2">
+                              {segments.map((seg, si) => {
+                                if (seg.type === 'text') {
+                                  return (
+                                    <p key={si} className="text-gray-800 leading-relaxed break-words" style={{ fontSize: curFontSize }}>
+                                      {seg.content.split('\n').map((line, li, arr) => (
+                                        <React.Fragment key={li}>
+                                          {line}
+                                          {li < arr.length - 1 && <br />}
+                                        </React.Fragment>
+                                      ))}
+                                    </p>
+                                  );
+                                }
+                                // type === 'table'
+                                return (
+                                  <div key={si} className="overflow-x-auto bg-white rounded border border-gray-200">
+                                    <table className="border-collapse w-full" style={{ fontSize: curFontSize }}>
+                                      {seg.headers.length > 0 && (
+                                        <thead>
+                                          <tr className="bg-gray-100">
+                                            {seg.headers.map((h, hi) => (
+                                              <th
+                                                key={hi}
+                                                className="border-b border-r border-gray-200 px-2 py-1 text-left font-medium text-gray-600 whitespace-nowrap bg-gray-50"
+                                              >
+                                                {h}
+                                              </th>
+                                            ))}
+                                          </tr>
+                                        </thead>
+                                      )}
+                                      <tbody>
+                                        {seg.rows.map((row, ri) => (
+                                          <tr key={ri} className={ri % 2 === 1 ? 'bg-gray-50/60' : 'bg-white'}>
+                                            {row.map((cell, ci) => (
+                                              <td
+                                                key={ci}
+                                                className="border-b border-r border-gray-200 px-2 py-1 text-gray-800 align-top"
+                                              >
+                                                {cell}
+                                              </td>
+                                            ))}
+                                          </tr>
+                                        ))}
+                                      </tbody>
+                                    </table>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          );
+                        }
+                        // 純文字或原始 MD 模式
+                        return (
+                          <p className="text-gray-800 leading-relaxed break-words" style={{ fontSize: curFontSize }}>
+                            {region.text?.split('\n').map((line, i, arr) => (
+                              <React.Fragment key={i}>
+                                {line}
+                                {i < arr.length - 1 && <br />}
+                              </React.Fragment>
+                            ))}
+                          </p>
+                        );
+                      })()}
 
                       {/* 複製成功提示（淡入淡出） */}
                       <div
