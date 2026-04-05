@@ -797,7 +797,21 @@ export default function TextPanel({
                           // 表格正常渲染 — 點擊進入編輯
                           const segments = parseTextSegments(region.text ?? '');
                           return (
-                            <div className="space-y-2">
+                            <div
+                              className="space-y-2"
+                              onDoubleClick={(e) => {
+                                e.stopPropagation();
+                                // 取消第一次 click 剛觸發的編輯模式，改為複製
+                                setEditingRegionKey(null);
+                                setEditText('');
+                                setEditingTableData(null);
+                                if (region.text) {
+                                  navigator.clipboard.writeText(region.text);
+                                  setCopiedKey(regionKey);
+                                  setTimeout(() => setCopiedKey(null), 1200);
+                                }
+                              }}
+                            >
                               {segments.map((seg, si) => {
                                 if (seg.type === 'text') {
                                   return (
@@ -890,6 +904,17 @@ export default function TextPanel({
                             className="text-gray-800 leading-relaxed break-words cursor-text"
                             style={{ fontSize: curFontSize }}
                             onClick={(e) => { e.stopPropagation(); enterTextEdit(regionKey, region.text ?? ''); }}
+                            onDoubleClick={(e) => {
+                              e.stopPropagation();
+                              // 取消第一次 click 剛觸發的編輯模式，改為複製
+                              setEditingRegionKey(null);
+                              setEditText('');
+                              if (region.text) {
+                                navigator.clipboard.writeText(region.text);
+                                setCopiedKey(regionKey);
+                                setTimeout(() => setCopiedKey(null), 1200);
+                              }
+                            }}
                           >
                             {region.text?.split('\n').map((line, i, arr) => (
                               <React.Fragment key={i}>
