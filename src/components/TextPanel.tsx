@@ -78,6 +78,7 @@ function parseTextSegments(text: string): Segment[] {
 }
 
 const DEFAULT_FONT_SIZE = 13;
+const DEFAULT_TABLE_FONT_SIZE = 11;
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -492,9 +493,9 @@ export default function TextPanel({
 
                       {/* 區域標籤列（含字型大小 +/- 及表格切換按鈕） */}
                       {(() => {
-                        const curFontSize = fontSizes.get(regionKey) ?? DEFAULT_FONT_SIZE;
                         const hasTable = !isEmpty && !!region.text && hasMarkdownTable(region.text);
                         const isRawMd = rawMarkdownRegions.has(regionKey);
+                        const curFontSize = fontSizes.get(regionKey) ?? (hasTable && !isRawMd ? DEFAULT_TABLE_FONT_SIZE : DEFAULT_FONT_SIZE);
 
                         const adjustFont = (delta: number, e: React.MouseEvent) => {
                           e.stopPropagation();
@@ -532,7 +533,10 @@ export default function TextPanel({
                             {!region.label && <span className="flex-1" />}
 
                             {/* 字型大小 − size + */}
-                            <div className="flex items-center gap-0.5 flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
+                            <div
+                              className="flex items-center gap-0.5 flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity"
+                              onDoubleClick={(e) => e.stopPropagation()}
+                            >
                               <button
                                 className="w-4 h-4 rounded flex items-center justify-center text-gray-400 hover:bg-gray-200 text-[11px] leading-none cursor-pointer"
                                 onClick={(e) => adjustFont(-0.5, e)}
@@ -553,6 +557,7 @@ export default function TextPanel({
                               <button
                                 className="flex-shrink-0 text-[11px] px-1.5 py-0.5 rounded border border-gray-300 text-gray-500 hover:bg-gray-100 leading-none cursor-pointer opacity-0 group-hover:opacity-100 transition-opacity"
                                 onClick={toggleMd}
+                                onDoubleClick={(e) => e.stopPropagation()}
                                 title={isRawMd ? '切換到表格視圖' : '切換到原始 Markdown'}
                               >
                                 {isRawMd ? '表格' : 'MD'}
@@ -564,7 +569,9 @@ export default function TextPanel({
 
                       {/* 文字內容 */}
                       {(() => {
-                        const curFontSize = fontSizes.get(regionKey) ?? DEFAULT_FONT_SIZE;
+                        const userSize = fontSizes.get(regionKey);
+                        const curFontSize = userSize ?? DEFAULT_FONT_SIZE;
+                        const curTableFontSize = userSize ?? DEFAULT_TABLE_FONT_SIZE;
                         const hasTable = !isEmpty && !!region.text && hasMarkdownTable(region.text);
                         const isRawMd = rawMarkdownRegions.has(regionKey);
 
@@ -604,7 +611,7 @@ export default function TextPanel({
                                 // type === 'table'
                                 return (
                                   <div key={si} className="overflow-x-auto bg-white rounded border border-gray-200">
-                                    <table className="border-collapse w-full" style={{ fontSize: curFontSize }}>
+                                    <table className="border-collapse w-full" style={{ fontSize: curTableFontSize }}>
                                       {seg.headers.length > 0 && (
                                         <thead>
                                           <tr className="bg-gray-100">

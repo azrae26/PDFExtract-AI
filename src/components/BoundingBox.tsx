@@ -1,13 +1,13 @@
 /**
  * 功能：可拖動、可調整大小的標註框
- * 職責：在 PDF 頁面上渲染單一 bounding box，支援拖動移動、拖角/拖邊改大小、hover 互動
+ * 職責：在 PDF 頁面上渲染單一 bounding box，支援拖動移動、拖角/拖邊改大小（縮小 re-resizable 預設手柄命中區）、hover 互動
  * 依賴：react-rnd、types.ts、constants.ts
  */
 
 'use client';
 
 import { useRef, useState, useCallback, useEffect } from 'react';
-import { Rnd } from 'react-rnd';
+import { Rnd, type HandleStyles } from 'react-rnd';
 import { Region } from '@/lib/types';
 import { getBoxColor, EMPTY_BOX_COLOR, NORMALIZED_MAX } from '@/lib/constants';
 
@@ -52,6 +52,20 @@ function normalizedToPixel(
     height: ((y2 - y1) / NORMALIZED_MAX) * displayHeight,
   };
 }
+
+/**
+ * re-resizable 預設角 20×20px、邊 10px 易誤觸；角與邊皆改為 8px，偏移 ±4px。
+ */
+const COMPACT_RESIZE_HANDLE_STYLES: HandleStyles = {
+  top: { height: '8px', top: '-4px', width: '100%', left: '0', cursor: 'row-resize' },
+  bottom: { height: '8px', bottom: '-4px', width: '100%', left: '0', cursor: 'row-resize' },
+  left: { width: '8px', left: '-4px', height: '100%', top: '0', cursor: 'col-resize' },
+  right: { width: '8px', right: '-4px', height: '100%', top: '0', cursor: 'col-resize' },
+  topLeft: { width: '8px', height: '8px', left: '-4px', top: '-4px', cursor: 'nw-resize' },
+  topRight: { width: '8px', height: '8px', right: '-4px', top: '-4px', cursor: 'ne-resize' },
+  bottomLeft: { width: '8px', height: '8px', left: '-4px', bottom: '-4px', cursor: 'sw-resize' },
+  bottomRight: { width: '8px', height: '8px', right: '-4px', bottom: '-4px', cursor: 'se-resize' },
+};
 
 /** 像素座標 → 歸一化座標 */
 function pixelToNormalized(
@@ -216,6 +230,7 @@ export default function BoundingBox({
         bottomRight: true,
         bottomLeft: true,
       }}
+      resizeHandleStyles={useOriginal ? undefined : COMPACT_RESIZE_HANDLE_STYLES}
     >
       <div
         className={`w-full h-full transition-all duration-150 group animate-region-in ${useOriginal ? 'cursor-default' : 'cursor-move'}`}
