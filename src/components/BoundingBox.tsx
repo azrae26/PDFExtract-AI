@@ -106,6 +106,10 @@ export default function BoundingBox({
   const activeBbox = useOriginal ? region.originalBbox! : region.bbox;
   const { x, y, width, height } = normalizedToPixel(activeBbox, displayWidth, displayHeight);
 
+  // === 拖動門檻：避免點擊時微小抖動誤觸發拖動 ===
+  const DRAG_THRESHOLD_PX = 4;
+  const dragStartRef = useRef<{ x: number; y: number } | null>(null);
+
   // === Hover 延遲：防止滑鼠從框移向按鈕時 z-index 瞬間下降導致按鈕被鄰框遮蓋 ===
   const unhoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const handleMouseEnter = useCallback(() => {
@@ -197,7 +201,18 @@ export default function BoundingBox({
       bounds="parent"
       minWidth={15}
       minHeight={15}
+      onDragStart={(_e, d) => {
+        dragStartRef.current = { x: d.x, y: d.y };
+      }}
       onDragStop={(_e, d) => {
+        const start = dragStartRef.current;
+        dragStartRef.current = null;
+        // 移動距離未達門檻，視為點擊而非拖動，不更新
+        if (start) {
+          const dx = Math.abs(d.x - start.x);
+          const dy = Math.abs(d.y - start.y);
+          if (dx < DRAG_THRESHOLD_PX && dy < DRAG_THRESHOLD_PX) return;
+        }
         const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
         console.log(`[BoundingBox][${ts}] onDragStop r${region.id} x=${d.x.toFixed(1)} y=${d.y.toFixed(1)} w=${width.toFixed(1)} h=${height.toFixed(1)}`);
         const newBbox = pixelToNormalized(d.x, d.y, width, height, displayWidth, displayHeight);
