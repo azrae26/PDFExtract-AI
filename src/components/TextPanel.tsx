@@ -3,13 +3,13 @@
  * 職責：顯示所有頁面的分析文字，按頁碼+順序排列，支援 hover 高亮互動、複製全文、
  *       刪除單一區域（同步刪除中間欄框）、拖曳調整同頁區域順序、
  *       Markdown 表格自動渲染（可切換回原始 MD）、per-region 字型大小調整、
- *       點擊文字區進入編輯模式（純文字/Raw MD 用 textarea，表格視圖用 inline input）
+ *       點擊文字區進入編輯模式（純文字/Raw MD 用 textarea；高度以 useLayoutEffect 對齊內容，避免較 <p> 突增）
  * 依賴：types.ts、constants.ts
  */
 
 'use client';
 
-import React, { useRef, useEffect, useCallback, useState } from 'react';
+import React, { useRef, useEffect, useLayoutEffect, useCallback, useState } from 'react';
 import { Region } from '@/lib/types';
 import { getBoxColor, EMPTY_BOX_COLOR } from '@/lib/constants';
 
@@ -160,6 +160,18 @@ export default function TextPanel({
 
   // === 雙擊右鍵刪除 ===
   const lastRightClickRef = useRef<{ key: string; time: number }>({ key: '', time: 0 });
+
+  // === 單擊/雙擊消歧義：延遲進入編輯模式，讓雙擊可以複製而非進入編輯 ===
+  const textClickTimerRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+  const textEditTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+
+  // 純文字編輯：textarea 預設 min-height / scrollHeight 常高於對應 <p>，同步為內容高度避免卡片跳高
+  useLayoutEffect(() => {
+    const el = textEditTextareaRef.current;
+    if (!el) return;
+    el.style.height = '0px';
+    el.style.height = `${el.scrollHeight}px`;
+  }, [editingRegionKey, editText]);
 
   // === 拖曳排序狀態 ===
 
@@ -560,6 +572,9 @@ export default function TextPanel({
                       onClick={() => onClickRegion(regionKey)}
                       onDoubleClick={() => {
                         if (editingRegionKey === regionKey) return;
+                        // 取消文字區域的單擊計時器（若有的話）
+                        const timer = textClickTimerRef.current.get(regionKey);
+                        if (timer) { clearTimeout(timer); textClickTimerRef.current.delete(regionKey); }
                         if (region.text) {
                           navigator.clipboard.writeText(region.text);
                           setCopiedKey(regionKey);
@@ -797,21 +812,7 @@ export default function TextPanel({
                           // 表格正常渲染 — 點擊進入編輯
                           const segments = parseTextSegments(region.text ?? '');
                           return (
-                            <div
-                              className="space-y-2"
-                              onDoubleClick={(e) => {
-                                e.stopPropagation();
-                                // 取消第一次 click 剛觸發的編輯模式，改為複製
-                                setEditingRegionKey(null);
-                                setEditText('');
-                                setEditingTableData(null);
-                                if (region.text) {
-                                  navigator.clipboard.writeText(region.text);
-                                  setCopiedKey(regionKey);
-                                  setTimeout(() => setCopiedKey(null), 1200);
-                                }
-                              }}
-                            >
+                            <div className="space-y-2">
                               {segments.map((seg, si) => {
                                 if (seg.type === 'text') {
                                   return (
@@ -819,7 +820,18 @@ export default function TextPanel({
                                       key={si}
                                       className="text-gray-800 leading-relaxed break-words cursor-text"
                                       style={{ fontSize: curFontSize }}
-                                      onClick={(e) => { e.stopPropagation(); enterTableEditMode(regionKey, segments, `${si}-text`); }}
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        if (e.detail >= 2) return;
+                                        const cellKey = `${regionKey}-${si}-text`;
+                                        const existing = textClickTimerRef.current.get(cellKey);
+                                        if (existing) clearTimeout(existing);
+                                        const timer = setTimeout(() => {
+                                          textClickTimerRef.current.delete(cellKey);
+                                          enterTableEditMode(regionKey, segments, `${si}-text`);
+                                        }, 200);
+                                        textClickTimerRef.current.set(cellKey, timer);
+                                      }}
                                     >
                                       {seg.content.split('\n').map((line, li, arr) => (
                                         <React.Fragment key={li}>
@@ -841,7 +853,18 @@ export default function TextPanel({
                                               <th
                                                 key={hi}
                                                 className="border-b border-r border-gray-200 px-2 py-1 text-left font-medium text-gray-600 whitespace-nowrap bg-gray-50 cursor-text min-w-[40px]"
-                                                onClick={(e) => { e.stopPropagation(); enterTableEditMode(regionKey, segments, `${si}-h-${hi}`); }}
+                                                onClick={(e) => {
+                                                  e.stopPropagation();
+                                                  if (e.detail >= 2) return;
+                                                  const cellKey = `${regionKey}-${si}-h-${hi}`;
+                                                  const existing = textClickTimerRef.current.get(cellKey);
+                                                  if (existing) clearTimeout(existing);
+                                                  const timer = setTimeout(() => {
+                                                    textClickTimerRef.current.delete(cellKey);
+                                                    enterTableEditMode(regionKey, segments, `${si}-h-${hi}`);
+                                                  }, 200);
+                                                  textClickTimerRef.current.set(cellKey, timer);
+                                                }}
                                               >
                                                 {h}
                                               </th>
@@ -856,7 +879,18 @@ export default function TextPanel({
                                               <td
                                                 key={ci}
                                                 className="border-b border-r border-gray-200 px-2 py-1 text-gray-800 align-top cursor-text min-w-[40px]"
-                                                onClick={(e) => { e.stopPropagation(); enterTableEditMode(regionKey, segments, `${si}-r-${ri}-${ci}`); }}
+                                                onClick={(e) => {
+                                                  e.stopPropagation();
+                                                  if (e.detail >= 2) return;
+                                                  const cellKey = `${regionKey}-${si}-r-${ri}-${ci}`;
+                                                  const existing = textClickTimerRef.current.get(cellKey);
+                                                  if (existing) clearTimeout(existing);
+                                                  const timer = setTimeout(() => {
+                                                    textClickTimerRef.current.delete(cellKey);
+                                                    enterTableEditMode(regionKey, segments, `${si}-r-${ri}-${ci}`);
+                                                  }, 200);
+                                                  textClickTimerRef.current.set(cellKey, timer);
+                                                }}
                                               >
                                                 {cell}
                                               </td>
@@ -872,29 +906,28 @@ export default function TextPanel({
                           );
                         }
 
-                        // 純文字或原始 MD 模式 — 編輯中
+                        // 純文字或原始 MD 模式 — 編輯中（不另包一層 div，避免額外盒模型；rows=1 + line-height 對齊 leading-relaxed）
                         if (isEditing) {
                           return (
-                            <div className="rounded-sm bg-white" style={{ boxShadow: '0 0 0 1px #93c5fd, 0 0 0 2.5px #bfdbfe' }}>
-                              <textarea
-                                autoFocus
-                                className="w-full resize-none border-0 bg-transparent p-0 text-gray-800 leading-relaxed break-words focus:outline-none"
-                                style={{ fontSize: curFontSize, overflow: 'hidden' }}
-                                ref={(el) => { if (el) { el.style.height = 'auto'; el.style.height = el.scrollHeight + 'px'; } }}
-                                value={editText}
-                                onChange={(e) => {
-                                  e.target.style.height = 'auto';
-                                  e.target.style.height = e.target.scrollHeight + 'px';
-                                  setEditText(e.target.value);
-                                }}
-                                onBlur={() => saveTextEdit(page, region.id)}
-                                onClick={(e) => e.stopPropagation()}
-                                onKeyDown={(e) => {
-                                  if (e.key === 'Escape') { e.preventDefault(); setEditingRegionKey(null); setEditText(''); }
-                                  e.stopPropagation();
-                                }}
-                              />
-                            </div>
+                            <textarea
+                              ref={textEditTextareaRef}
+                              rows={1}
+                              autoFocus
+                              className="w-full min-h-0 resize-none border-0 bg-white rounded-sm p-0 m-0 text-gray-800 leading-relaxed break-words focus:outline-none box-border block overflow-hidden"
+                              style={{
+                                fontSize: curFontSize,
+                                lineHeight: 1.625,
+                                boxShadow: '0 0 0 1px #93c5fd, 0 0 0 2.5px #bfdbfe',
+                              }}
+                              value={editText}
+                              onChange={(e) => setEditText(e.target.value)}
+                              onBlur={() => saveTextEdit(page, region.id)}
+                              onClick={(e) => e.stopPropagation()}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Escape') { e.preventDefault(); setEditingRegionKey(null); setEditText(''); }
+                                e.stopPropagation();
+                              }}
+                            />
                           );
                         }
 
@@ -903,12 +936,24 @@ export default function TextPanel({
                           <p
                             className="text-gray-800 leading-relaxed break-words cursor-text"
                             style={{ fontSize: curFontSize }}
-                            onClick={(e) => { e.stopPropagation(); enterTextEdit(regionKey, region.text ?? ''); }}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              // 雙擊的第二下 click（e.detail >= 2）由 onDoubleClick 處理，這裡略過
+                              if (e.detail >= 2) return;
+                              // 延遲進入編輯，讓雙擊有機會取消
+                              const existing = textClickTimerRef.current.get(regionKey);
+                              if (existing) clearTimeout(existing);
+                              const timer = setTimeout(() => {
+                                textClickTimerRef.current.delete(regionKey);
+                                enterTextEdit(regionKey, region.text ?? '');
+                              }, 200);
+                              textClickTimerRef.current.set(regionKey, timer);
+                            }}
                             onDoubleClick={(e) => {
                               e.stopPropagation();
-                              // 取消第一次 click 剛觸發的編輯模式，改為複製
-                              setEditingRegionKey(null);
-                              setEditText('');
+                              // 取消待執行的單擊計時器，改為複製
+                              const timer = textClickTimerRef.current.get(regionKey);
+                              if (timer) { clearTimeout(timer); textClickTimerRef.current.delete(regionKey); }
                               if (region.text) {
                                 navigator.clipboard.writeText(region.text);
                                 setCopiedKey(regionKey);

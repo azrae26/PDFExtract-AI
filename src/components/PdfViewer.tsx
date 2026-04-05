@@ -7,7 +7,7 @@
 
 'use client';
 
-import { useState, useRef, useCallback, useEffect, useMemo, MouseEvent as ReactMouseEvent } from 'react';
+import { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo, MouseEvent as ReactMouseEvent } from 'react';
 import { Document, Page, pdfjs } from 'react-pdf';
 import 'react-pdf/dist/Page/AnnotationLayer.css';
 import BoundingBox from './BoundingBox';
@@ -34,8 +34,8 @@ interface PdfViewerProps {
   onRegionAdd: (page: number, bbox: [number, number, number, number]) => void;
   /** 計算某頁之前所有頁面 region 數量（配色偏移量） */
   getGlobalColorOffset: (page: number) => number;
-  /** 要滾動到的 regionKey（格式 "page-regionId"），變化時觸發 scrollIntoView */
-  scrollToRegionKey: string | null;
+  /** 右欄點擊觸發：滾動到對應頁（key 格式 "page-regionId"；requestId 每次點擊遞增以支援同區重複點） */
+  scrollToPdfRegion: { key: string; requestId: number } | null;
   /** 重新分析單頁 */
   onReanalyzePage: (page: number) => void;
   /** 雙擊框框 → 截圖送 AI 識別 */
@@ -69,7 +69,7 @@ export default function PdfViewer({
   onRegionRemove,
   onRegionAdd,
   getGlobalColorOffset,
-  scrollToRegionKey,
+  scrollToPdfRegion,
   onReanalyzePage,
   onRegionDoubleClick,
   analyzingPages,
@@ -262,15 +262,15 @@ export default function PdfViewer({
     console.error('[PdfViewer] Page load error:', error);
   }, []);
 
-  // 當 scrollToRegionKey 變化時，lerp 動畫滾動到對應頁面（置中）
+  // 當 scrollToPdfRegion 變化時，lerp 動畫滾動到對應頁面（置中）；useLayoutEffect 在繪製前開跑，避免可感延遲
   const viewerScrollRafRef = useRef<number>(0);
   const viewerScrollTargetRef = useRef<number | null>(null);
 
-  useEffect(() => {
-    if (!scrollToRegionKey) return;
+  useLayoutEffect(() => {
+    if (!scrollToPdfRegion) return;
     const scrollEl = scrollRef.current;
     if (!scrollEl) return;
-    const pageNum = parseInt(scrollToRegionKey.split('-')[0], 10);
+    const pageNum = parseInt(scrollToPdfRegion.key.split('-')[0], 10);
     if (isNaN(pageNum)) return;
     const pageEl = pageElRefs.current.get(pageNum);
     if (!pageEl) return;
@@ -283,7 +283,8 @@ export default function PdfViewer({
 
     if (viewerScrollRafRef.current) return; // 動畫已在跑，更新 target 即可
 
-    const LERP_FACTOR = 0.15;
+    // 略低於 0.15 → 整段動畫稍慢、更易跟上
+    const LERP_FACTOR = 0.12;
     const THRESHOLD = 0.5;
 
     const animate = () => {
@@ -319,7 +320,7 @@ export default function PdfViewer({
         viewerScrollRafRef.current = 0;
       }
     };
-  }, [scrollToRegionKey]);
+  }, [scrollToPdfRegion]);
 
   // 用戶手動滾輪時取消正在進行的動畫
   useEffect(() => {
