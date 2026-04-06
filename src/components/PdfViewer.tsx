@@ -751,7 +751,7 @@ export default function PdfViewer({
                   onMouseLeave={() => { if (hoveredPageRef.current === pageNum) setHoveredPageNum(null); }}
                 >
                   {/* 頁碼標籤 */}
-                  <div className="absolute -top-0 left-0 bg-gray-700/70 text-white text-xs px-2 py-0.5 rounded-br z-10">
+                  <div className="absolute -top-0 left-0 bg-gray-700/70 text-white text-xs px-2 py-0.5 rounded-br z-10 pointer-events-none select-none">
                     {pageNum} / {numPages}
                   </div>
 
