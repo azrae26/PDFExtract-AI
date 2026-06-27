@@ -59,6 +59,14 @@ const EMPTY_SET = new Set<number>();
 const IS_DEV_MODE = typeof window !== 'undefined' &&
   (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
 
+/**
+ * 本機橋接來源：遠端站貼「路徑」時改打本機 dev server 讀檔。
+ * 意圖＝遠端伺服器看不到使用者本機磁碟，路徑法唯一解是由「本機跑著的服務」代理讀檔回傳。
+ * 本機（IS_DEV_MODE）用相對路徑即同源；遠端則跨來源打此 origin（read-file 已開 CORS + PNA）。
+ * 若你的本機服務不在 3000 埠，改這裡。
+ */
+const LOCAL_BRIDGE_ORIGIN = 'http://localhost:3000';
+
 // 設定 PDF.js worker（使用 CDN，避免 bundler 問題）
 if (typeof window !== 'undefined') {
   pdfjs.GlobalWorkerOptions.workerSrc = `//unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
@@ -709,19 +717,13 @@ export default function PDFExtractApp() {
         }
       }
 
-      // 其次：剪貼簿是文字路徑（Ctrl+C 複製「路徑」）→ 需伺服器讀本機磁碟，僅 localhost 可行
+      // 其次：剪貼簿是文字路徑（Ctrl+C 複製「路徑」）→ 由本機橋接讀檔（localhost 同源 / 遠端打 localhost:3000）
       const text = e.clipboardData?.getData('text/plain');
       if (!text) return;
       const pdfPath = extractPdfPath(text);
       if (!pdfPath) return;
       e.preventDefault();
-      if (IS_DEV_MODE) {
-        setPasteSource({ kind: 'path', path: pdfPath, label: pdfPath });
-      } else {
-        // 遠端伺服器看不到你本機 D:\ 磁碟，路徑法必 404 → 引導改用複製檔案本身或拖入
-        setPasteHint('偵測到檔案路徑，但遠端伺服器無法讀取你本機磁碟。請改用 Ctrl+C 複製「檔案本身」再貼上，或直接把 PDF 拖進來。');
-        window.setTimeout(() => setPasteHint(null), 7000);
-      }
+      setPasteSource({ kind: 'path', path: pdfPath, label: pdfPath });
     };
     document.addEventListener('paste', handler);
     return () => document.removeEventListener('paste', handler);
@@ -750,11 +752,19 @@ export default function PDFExtractApp() {
       if (pasteSource.kind === 'file') {
         file = pasteSource.file; // 瀏覽器已持有 bytes，免 API
       } else {
-        const res = await fetch('/api/read-file', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ filePath: pasteSource.path }),
-        });
+        // 路徑來源：本機同源直接打；遠端打本機橋接（伺服器看不到使用者磁碟，必由本機代理）
+        const base = IS_DEV_MODE ? '' : LOCAL_BRIDGE_ORIGIN;
+        let res: Response;
+        try {
+          res = await fetch(`${base}/api/read-file`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ filePath: pasteSource.path }),
+          });
+        } catch {
+          // fetch 直接 throw（多為連不上橋接）→ 給明確指引，不丟原始 TypeError
+          throw new Error(`連不上本機橋接（${LOCAL_BRIDGE_ORIGIN}）。請在本機開著服務（npm run dev）後再貼，或改用複製檔案本身／拖入。`);
+        }
         if (!res.ok) {
           const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
           throw new Error(err.error || `HTTP ${res.status}`);
@@ -767,7 +777,9 @@ export default function PDFExtractApp() {
       setPasteSource(null);
     } catch (err) {
       const msg = err instanceof Error ? err.message : '讀取檔案失敗';
-      alert(`無法讀取檔案：${msg}`);
+      setPasteSource(null);
+      setPasteHint(`無法讀取檔案：${msg}`);
+      window.setTimeout(() => setPasteHint(null), 10000);
     } finally {
       setPasteLoading(false);
     }
