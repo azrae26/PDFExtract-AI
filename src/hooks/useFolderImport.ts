@@ -55,9 +55,12 @@ export default function useFolderImport(): UseFolderImport {
   }, []);
 
   // mount：還原已存的資料夾 handle；權限已 granted 才自動列出（不打擾、不請求）
+  // 延後列舉：資料夾可能上萬檔，列舉(iterate+排序)+渲染會與「活躍 PDF session 還原」搶主線程。
+  // 故等主線程閒置(requestIdleCallback)再列，確保 PDF 先還原渲染；timeout 保險不會永不執行。
   useEffect(() => {
     if (!supported) return;
     let cancelled = false;
+    let cancelDefer = () => {};
     (async () => {
       const stored = await loadDirHandle();
       if (!stored || cancelled) return;
@@ -65,9 +68,19 @@ export default function useFolderImport(): UseFolderImport {
       const perm = await ensureReadPermission(stored, false);
       if (cancelled) return;
       setPermission(perm as FolderPermission);
-      if (perm === 'granted') loadList(stored);
+      if (perm === 'granted') {
+        setLoading(true); // 立即顯示「讀取中」，避免延後期間閃現「沒有 PDF」
+        const run = () => { if (!cancelled) loadList(stored); };
+        if (typeof window.requestIdleCallback === 'function') {
+          const id = window.requestIdleCallback(run, { timeout: 3000 });
+          cancelDefer = () => window.cancelIdleCallback(id);
+        } else {
+          const id = window.setTimeout(run, 1200);
+          cancelDefer = () => window.clearTimeout(id);
+        }
+      }
     })();
-    return () => { cancelled = true; };
+    return () => { cancelled = true; cancelDefer(); };
   }, [supported, loadList]);
 
   const connect = useCallback(async () => {
