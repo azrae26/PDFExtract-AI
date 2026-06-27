@@ -36,13 +36,17 @@ export async function ensureReadPermission(
 
 /** 列出資料夾內所有 PDF（依檔名排序，繁中 locale） */
 export async function listPdfFiles(dir: FileSystemDirectoryHandle): Promise<FolderPdf[]> {
+  const _t0 = performance.now();
   const out: FolderPdf[] = [];
   for await (const entry of dir.values()) {
     if (entry.kind === 'file' && entry.name.toLowerCase().endsWith('.pdf')) {
       out.push({ name: entry.name, handle: entry as FileSystemFileHandle });
     }
   }
+  const _tIter = performance.now();
   out.sort((a, b) => a.name.localeCompare(b.name, 'zh-Hant'));
+  const _tSort = performance.now();
+  console.log(`[PERF] 📁 listPdfFiles: 列舉 ${out.length} 檔耗 ${Math.round(_tIter - _t0)}ms + 排序 ${Math.round(_tSort - _tIter)}ms，結束 @ ${Math.round(_tSort)}ms`);
   return out;
 }
 

@@ -43,10 +43,12 @@ export default function useFolderImport(): UseFolderImport {
   const [error, setError] = useState<string | null>(null);
 
   const loadList = useCallback(async (dir: FileSystemDirectoryHandle) => {
+    console.log(`[PERF] 📂 loadList 觸發 @ ${Math.round(performance.now())}ms`);
     setLoading(true);
     setError(null);
     try {
       setPdfs(await listPdfFiles(dir));
+      console.log(`[PERF] 📂 loadList setPdfs 完成 @ ${Math.round(performance.now())}ms`);
     } catch (e) {
       setError(e instanceof Error ? e.message : '讀取資料夾失敗');
     } finally {
@@ -68,9 +70,13 @@ export default function useFolderImport(): UseFolderImport {
       const perm = await ensureReadPermission(stored, false);
       if (cancelled) return;
       setPermission(perm as FolderPermission);
+      console.log(`[PERF] 📂 資料夾權限=${perm} @ ${Math.round(performance.now())}ms`);
       if (perm === 'granted') {
         setLoading(true); // 立即顯示「讀取中」，避免延後期間閃現「沒有 PDF」
-        const run = () => { if (!cancelled) loadList(stored); };
+        const run = () => {
+          console.log(`[PERF] 📂 idle 觸發列舉 @ ${Math.round(performance.now())}ms`);
+          if (!cancelled) loadList(stored);
+        };
         if (typeof window.requestIdleCallback === 'function') {
           const id = window.requestIdleCallback(run, { timeout: 3000 });
           cancelDefer = () => window.cancelIdleCallback(id);

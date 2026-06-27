@@ -458,12 +458,12 @@ export default function useFileManager({
     const fileEntry = filesRef.current.find((f) => f.id === fileId);
     if (!fileEntry) return null;
     try {
+      console.log(`[PERF] 🔵 getDocument 呼叫 @ ${Math.round(performance.now())}ms (${fileEntry.name})`);
       const doc = await pdfjs.getDocument(fileEntry.url).promise;
+      console.log(`[PERF] 🟢 getDocument 解析完成 @ ${Math.round(performance.now())}ms (${fileEntry.name})`);
       // 儲存到快取（標記為 selfLoaded，可安全 destroy）
       pdfDocCacheRef.current.set(fileId, doc);
       selfLoadedDocIdsRef.current.add(fileId);
-      const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
-      console.log(`[useFileManager][${ts}] 📂 On-demand loaded PDF for ${fileEntry.name}`);
       return doc;
     } catch (e) {
       console.warn(`[useFileManager] ⚠️ On-demand load failed for ${fileId}:`, e);
@@ -812,12 +812,13 @@ export default function useFileManager({
 
   // === 從 IndexedDB 恢復 session（mount-only）===
   useEffect(() => {
+    console.log(`[PERF] 🟡 loadSession 呼叫(mount) @ ${Math.round(performance.now())}ms`);
     loadSession().then((restored) => {
+      console.log(`[PERF] 🟡 loadSession 解析完成 @ ${Math.round(performance.now())}ms (${restored?.files.length ?? 0} 檔)`);
       if (restored && restored.files.length > 0) {
         setFiles(restored.files);
         setActiveFileId(restored.activeFileId);
-        const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
-        console.log(`[useFileManager][${ts}] ✅ Restored ${restored.files.length} file(s) from IndexedDB`);
+        console.log(`[PERF] 🟡 setFiles+setActiveFileId 完成 @ ${Math.round(performance.now())}ms`);
       }
       initializedRef.current = true;
     });

@@ -892,6 +892,8 @@ export default function PdfViewer({
                         if (!_firstPaintLogged) {
                           _firstPaintLogged = true;
                           console.log(`[PERF] ✅ PDF 內容畫出完成 @ ${Math.round(performance.now())}ms（page ${pageNum}，導航起點為 0）`);
+                          // 確定性訊號：活躍 PDF 已畫出 → 通知資料夾列舉可以開跑（避免上萬檔列舉搶在 PDF 前競爭 CPU/IO）
+                          window.dispatchEvent(new Event('pdf:first-paint'));
                         }
                       }}
                       onLoadError={handlePageError}
