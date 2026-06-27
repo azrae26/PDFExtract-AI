@@ -170,6 +170,12 @@ export default function useFileManager({
   filesRef.current = files;
   const activeFileIdRef = useRef<string | null>(null);
   activeFileIdRef.current = activeFileId;
+  // B3 首屏掛載閘門：還原 session 時若一次掛載/預載全部檔，N 個 getDocument 會擠在單一 pdfjs
+  // worker 上搶主線程，拖慢「活躍檔」首屏渲染（LCP）。故首屏只掛/只載活躍檔，待其 Document
+  // onLoadSuccess（或保險 timeout）後才展開掛載+預載整個視窗。
+  // 不變量：展開發生在首次 PDF 載入後約 1 幀，「切檔零延遲」照舊；展開前極短時間內切檔僅延遲一個 Document 掛載。
+  const [mountWindowExpanded, setMountWindowExpanded] = useState(false);
+  const mountWindowExpandedRef = useRef(false);
   // 標記是否正在自動處理佇列（避免重複觸發）
   const processingQueueRef = useRef(false);
 
@@ -703,6 +709,8 @@ export default function useFileManager({
 
   // === PDF 滑動視窗預載：目前檔案 + 後 4 份 ===
   useEffect(() => {
+    // B3：首屏未展開前不預載——讓活躍檔 Document 獨占 worker 先渲染，避免 getDocument 風暴
+    if (!mountWindowExpanded) return;
     const cache = pdfDocCacheRef.current;
     const currentFiles = filesRef.current;
     const currentIdx = currentFiles.findIndex((f) => f.id === activeFileId);
@@ -780,7 +788,19 @@ export default function useFileManager({
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeFileId, files.length]);
+  }, [activeFileId, files.length, mountWindowExpanded]);
+
+  // B3 展開保險：活躍檔 Document 若載入失敗不會觸發展開，有檔後 1.5s 強制展開確保切檔零延遲可用
+  useEffect(() => {
+    if (files.length === 0 || mountWindowExpanded) return;
+    const id = setTimeout(() => {
+      if (!mountWindowExpandedRef.current) {
+        mountWindowExpandedRef.current = true;
+        setMountWindowExpanded(true);
+      }
+    }, 1500);
+    return () => clearTimeout(id);
+  }, [files.length, mountWindowExpanded]);
 
   // 清理所有檔案的 object URL
   useEffect(() => {
@@ -1048,6 +1068,12 @@ export default function useFileManager({
       // 僅活躍檔案才設定 pdfDocRef（供 useAnalysis 使用）
       if (fileId === activeFileIdRef.current) {
         pdfDocRef.current = pdf;
+        // B3：活躍檔 Document 載入完成（getDocument 已結束）→ 立即展開掛載+預載其餘檔。
+        // 直接 setState（不用 rAF——背景分頁 rAF 不觸發會導致永不展開、破壞切檔零延遲）。
+        if (!mountWindowExpandedRef.current) {
+          mountWindowExpandedRef.current = true;
+          setMountWindowExpanded(true);
+        }
       }
 
       // 更新檔案的 numPages
@@ -1207,10 +1233,15 @@ export default function useFileManager({
     console.log(`[useFileManager][${ts}] 🗑️ Cleared all files`);
   }, [invalidateSession]);
 
-  // === 多 PdfViewer 預掛載：以活躍檔案為中心，前後展開最多 PDF_CACHE_MAX（7）個 ===
-  // 檔案數 ≤ 7 時全部掛載，超過時以活躍檔案為中心的滑動視窗
+  // === 多 PdfViewer 預掛載：以活躍檔案為中心，前後展開最多 PDF_CACHE_MAX 個 ===
+  // 檔案數 ≤ PDF_CACHE_MAX 時全部掛載，超過時以活躍檔案為中心的滑動視窗
   const mountedFileIds = useMemo(() => {
     const ids = new Set<string>();
+    // B3：首屏未展開前只掛活躍檔，讓其獨占 worker 先渲染（避免 N 個 Document 同時 getDocument）
+    if (!mountWindowExpanded) {
+      if (activeFileId) ids.add(activeFileId);
+      return ids;
+    }
     if (files.length <= PDF_CACHE_MAX) {
       // 檔案數量在上限內，全部掛載 → 任意方向切換零延遲
       for (const f of files) ids.add(f.id);
@@ -1229,7 +1260,7 @@ export default function useFileManager({
       }
     }
     return ids;
-  }, [files, activeFileId]);
+  }, [files, activeFileId, mountWindowExpanded]);
 
   return {
     // Core state

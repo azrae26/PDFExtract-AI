@@ -4,7 +4,7 @@
  *       頁面 canvas 渲染與區域裁切（renderPageCanvas + cropRegionFromCanvas，支援同頁多 region 複用同一 canvas）、
  *       區域截圖裁切、區域識別 API、date/code/report metadata 候選值更新、
  *       畸形 bbox 偵測（isMalformedBbox：座標反轉或極端長形）
- * 依賴：pdfjs、types、constants、pdfTextExtract、brokerUtils、kaiuCmap（亂碼偵測）
+ * 依賴：pdfjs、types、constants、pdfTextExtract、brokerUtils、cidDetect（亂碼偵測）
  *
  * 重要設計：
  * - 所有函式皆為純函式（不依賴 React state），接受 isSessionValid callback 作為參數
@@ -17,7 +17,7 @@ import { Region } from '@/lib/types';
 import { RENDER_SCALE, JPEG_QUALITY, NORMALIZED_MAX } from '@/lib/constants';
 import { extractTextForRegions } from '@/lib/pdfTextExtract';
 import { isCompleteDate, shouldIgnoreBroker } from '@/lib/brokerUtils';
-import { isCidPassthrough } from '@/lib/kaiuCmap';
+import { isCidPassthrough } from '@/lib/cidDetect';
 
 /** 判定文字是否為亂碼（CID passthrough、錯誤編碼等），應觸發 AI 識別
  *  可讀字元：CJK、ASCII 可列印、常用標點。若可讀比例過低則視為亂碼 */

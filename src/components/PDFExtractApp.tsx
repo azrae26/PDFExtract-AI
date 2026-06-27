@@ -69,9 +69,12 @@ const IS_DEV_MODE = typeof window !== 'undefined' &&
  */
 const LOCAL_BRIDGE_ORIGIN = 'http://127.0.0.1:38217';
 
-// 設定 PDF.js worker（使用 CDN，避免 bundler 問題）
+// 設定 PDF.js worker：同源 serve（public/pdf.worker.min.mjs）。
+// 改自 unpkg CDN——跨來源 1MB + http→https 307 跳轉是首載 PDF 的最大瓶頸；
+// 同源消除跳轉、可瀏覽器快取、不受外部 CDN 冷啟動影響。
+// 版本由 prebuild 腳本（package.json）從 node_modules 複製，避免與 pdfjs 版本漂移。
 if (typeof window !== 'undefined') {
-  pdfjs.GlobalWorkerOptions.workerSrc = `//unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
+  pdfjs.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs';
 }
 
 export default function PDFExtractApp() {
