@@ -60,12 +60,12 @@ const IS_DEV_MODE = typeof window !== 'undefined' &&
   (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
 
 /**
- * 本機橋接來源：遠端站貼「路徑」時改打本機 dev server 讀檔。
+ * 本機橋接來源：遠端站貼「路徑」時改打本機橋接讀檔。
  * 意圖＝遠端伺服器看不到使用者本機磁碟，路徑法唯一解是由「本機跑著的服務」代理讀檔回傳。
- * 本機（IS_DEV_MODE）用相對路徑即同源；遠端則跨來源打此 origin（read-file 已開 CORS + PNA）。
- * 若你的本機服務不在 3000 埠，改這裡。
+ * 本機（IS_DEV_MODE）用相對路徑即同源；遠端則跨來源打此 origin（獨立橋接 pdfextract-bridge.mjs，已開 CORS + PNA）。
+ * 用專屬埠（非 3000）避免與本機 `npm run dev` 衝突；連不上時前端會引導下載一鍵安裝。
  */
-const LOCAL_BRIDGE_ORIGIN = 'http://localhost:3000';
+const LOCAL_BRIDGE_ORIGIN = 'http://127.0.0.1:38217';
 
 // 設定 PDF.js worker（使用 CDN，避免 bundler 問題）
 if (typeof window !== 'undefined') {
@@ -762,8 +762,26 @@ export default function PDFExtractApp() {
             body: JSON.stringify({ filePath: pasteSource.path }),
           });
         } catch {
-          // fetch 直接 throw（多為連不上橋接）→ 給明確指引，不丟原始 TypeError
-          throw new Error(`連不上本機橋接（${LOCAL_BRIDGE_ORIGIN}）。請在本機開著服務（npm run dev）後再貼，或改用複製檔案本身／拖入。`);
+          // 連不上橋接（多為未啟動）→ 遠端引導下載「一鍵安裝」（設開機自啟）；瀏覽器無法代為執行，故只能下載
+          setPasteSource(null);
+          const installFileName = 'PDFExtract啟用貼路徑匯入_執行一次.bat';
+          if (!IS_DEV_MODE && window.confirm(
+            '要用「貼路徑」匯入，需先在你電腦啟用一個小幫手（本機橋接）。\n\n' +
+            '按「確定」會下載一個設定檔；雙擊執行那一次後，以後（含重開機）貼路徑就能直接匯入，不必再做任何事。\n\n' +
+            '（瀏覽器無法替你執行，那一次需你手動雙擊）'
+          )) {
+            const a = document.createElement('a');
+            a.href = '/bridge/install-bridge.bat';
+            a.download = installFileName;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            setPasteHint(`已下載「${installFileName}」，到「下載」資料夾雙擊執行一次即可；完成後重貼路徑就能匯入，往後免再處理。`);
+          } else {
+            setPasteHint(`連不上本機橋接（${LOCAL_BRIDGE_ORIGIN}）。啟動橋接後再貼，或改用複製檔案本身／拖入。`);
+          }
+          window.setTimeout(() => setPasteHint(null), 14000);
+          return;
         }
         if (!res.ok) {
           const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
