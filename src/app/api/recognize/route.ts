@@ -9,19 +9,16 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { NextRequest, NextResponse } from 'next/server';
 
-/** 強制 thinking mode 的模型（無法設 thinkingBudget: 0）— 2.5 Pro 最低 128，3 Pro / 3.1 Pro 僅支援 thinking */
-const MODELS_REQUIRE_THINKING = new Set([
-  'gemini-3-pro-preview',
-  'gemini-3.1-pro-preview',
-  'gemini-2.5-pro',
-  'gemini-2.5-pro-preview',
-]);
+/** Pro 系列模型強制 thinking（無法設 thinkingBudget: 0）—— 用名稱 pattern 判斷，避免硬編碼 Set 與動態探測漂移 */
+function needsThinking(modelId: string): boolean {
+  return /pro/i.test(modelId);
+}
 
 type GenConfig = Parameters<InstanceType<typeof GoogleGenerativeAI>['getGenerativeModel']>[0]['generationConfig'];
 
 /** 依模型回傳最低推理程度：Pro 系列用 128，其餘用 0（關閉） */
 function getThinkingConfigMinimal(modelId: string): NonNullable<GenConfig> {
-  const budget = MODELS_REQUIRE_THINKING.has(modelId) ? 128 : 0;
+  const budget = needsThinking(modelId) ? 128 : 0;
   return { thinkingConfig: { thinkingBudget: budget } } as NonNullable<GenConfig>;
 }
 

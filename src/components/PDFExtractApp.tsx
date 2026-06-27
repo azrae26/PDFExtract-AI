@@ -24,7 +24,8 @@ import FolderPanel from './FolderPanel';
 import { Region } from '@/lib/types';
 import { DEFAULT_PROMPT, DEFAULT_TABLE_PROMPT } from '@/lib/constants';
 import { DEFAULT_BROKER_ALIAS_GROUPS, DEFAULT_BROKER_SKIP_MAP } from '@/lib/brokerUtils';
-import { DEFAULT_MODEL, isOpenRouterModel } from './PdfUploader';
+import { DEFAULT_MODEL, GEMINI_MODELS, isOpenRouterModel } from './PdfUploader';
+import type { ModelChoice } from '@/app/api/models/route';
 import useFileManager from '@/hooks/useFileManager';
 import usePanelResize from '@/hooks/usePanelResize';
 import { extractTextForRegions } from '@/lib/pdfTextExtract';
@@ -34,6 +35,7 @@ const DEFAULT_BATCH_SIZE = 3;
 
 // === localStorage 持久化 key ===
 const STORAGE_KEY = 'pdfextract-ai-config';
+const MODEL_CACHE_KEY = 'pdfextract-ai-models';
 
 /** 從 localStorage 讀取已儲存的配置 */
 function loadConfig(): Record<string, unknown> {
@@ -104,6 +106,15 @@ export default function PDFExtractApp() {
     const cfg = loadConfig();
     return typeof cfg.openRouterApiKey === 'string' ? cfg.openRouterApiKey : '';
   });
+  // 動態模型列表（從 /api/models 探測，fallback seed = GEMINI_MODELS）
+  const [modelChoices, setModelChoices] = useState<ModelChoice[]>(() => {
+    try {
+      const cached = localStorage.getItem(MODEL_CACHE_KEY);
+      if (cached) return JSON.parse(cached);
+    } catch { /* ignore */ }
+    return GEMINI_MODELS.map(m => ({ id: m.id, label: m.label, thinking: /pro/i.test(m.id) }));
+  });
+  const [isRefreshingModels, setIsRefreshingModels] = useState(false);
   // 券商 → 忽略末尾頁數映射（持久化到 localStorage）
   const [brokerSkipMap, setBrokerSkipMap] = useState<Record<string, number>>(() => {
     const cfg = loadConfig();
@@ -224,6 +235,24 @@ export default function PDFExtractApp() {
         // 延遲啟用 DEVMODE 自動上傳，確保初始設定的 state 更新已套用完畢
         setTimeout(() => { devAutoUploadReadyRef.current = true; }, 1000);
       });
+
+    // 模型探測（stale-while-revalidate：先用 localStorage 快取渲染，背景 fetch 更新）
+    const currentApiKey = loadConfig().apiKey as string || '';
+    if (currentApiKey) {
+      fetch('/api/models', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ apiKey: currentApiKey }),
+      })
+        .then(r => r.json())
+        .then(json => {
+          if (json.models && Array.isArray(json.models) && json.models.length > 0) {
+            setModelChoices(json.models);
+            try { localStorage.setItem(MODEL_CACHE_KEY, JSON.stringify(json.models)); } catch { /* ignore */ }
+          }
+        })
+        .catch(() => { /* 探測失敗靜默，繼續用快取/seed */ });
+    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -1127,6 +1156,31 @@ export default function PDFExtractApp() {
           onBrokerAliasGroupsChange={setBrokerAliasGroups}
           activeFileStatus={activeFile?.status}
           onUploadSettings={handleUploadSettings}
+          modelChoices={modelChoices}
+          onRefreshModels={() => {
+            const key = apiKey || openRouterApiKey;
+            if (!key || isRefreshingModels) return;
+            setIsRefreshingModels(true);
+            fetch('/api/models', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ apiKey: key }),
+            })
+              .then(r => r.json())
+              .then(json => {
+                if (json.models && Array.isArray(json.models) && json.models.length > 0) {
+                  setModelChoices(json.models);
+                  try { localStorage.setItem(MODEL_CACHE_KEY, JSON.stringify(json.models)); } catch { /* ignore */ }
+                  // 若當前模型不在新列表中 → fallback
+                  if (!json.models.some((m: ModelChoice) => m.id === model)) {
+                    setModel(json.models[0]?.id || DEFAULT_MODEL);
+                  }
+                }
+              })
+              .catch(() => { /* 靜默失敗 */ })
+              .finally(() => setIsRefreshingModels(false));
+          }}
+          isRefreshingModels={isRefreshingModels}
         />
       </div>
 
