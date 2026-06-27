@@ -660,6 +660,89 @@ export default function PDFExtractApp() {
     [handleFilesUpload, dragZone, apiKey, openRouterApiKey, model]
   );
 
+  // === 貼上檔案路徑功能：偵測 paste 中的 .pdf 路徑 → 顯示三區域選擇 → 點擊後透過 API 讀取檔案 ===
+  const [pastedFilePath, setPastedFilePath] = useState<string | null>(null);
+  const [pasteLoading, setPasteLoading] = useState(false);
+
+  /** 從貼上文字中擷取 PDF 路徑（支援 file:// URI、Windows/Unix 絕對路徑） */
+  const extractPdfPath = (text: string): string | null => {
+    const trimmed = text.trim();
+    if (!trimmed) return null;
+    // 支援多行：逐行找第一個 .pdf 路徑
+    const lines = trimmed.split(/\r?\n/);
+    for (const line of lines) {
+      const l = line.trim();
+      if (!l.toLowerCase().endsWith('.pdf')) continue;
+      // file:// URI 或 Windows 絕對路徑(D:\...) 或 Unix 絕對路徑(/...)
+      if (l.startsWith('file://') || /^[A-Za-z]:[\\/]/.test(l) || l.startsWith('/')) {
+        return l;
+      }
+    }
+    return null;
+  };
+
+  // 全域 paste 監聽（輸入框內不攔截）
+  useEffect(() => {
+    const handler = (e: ClipboardEvent) => {
+      const el = e.target as HTMLElement;
+      const tag = el?.tagName?.toUpperCase();
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el?.isContentEditable) return;
+      const text = e.clipboardData?.getData('text/plain');
+      if (!text) return;
+      const pdfPath = extractPdfPath(text);
+      if (pdfPath) {
+        e.preventDefault();
+        setPastedFilePath(pdfPath);
+      }
+    };
+    document.addEventListener('paste', handler);
+    return () => document.removeEventListener('paste', handler);
+  }, []);
+
+  // Esc 關閉貼上覆蓋層
+  useEffect(() => {
+    if (!pastedFilePath) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setPastedFilePath(null);
+    };
+    document.addEventListener('keydown', handler);
+    return () => document.removeEventListener('keydown', handler);
+  }, [pastedFilePath]);
+
+  /** 貼上路徑 → 選區後：呼叫 /api/read-file 取得檔案 → handleFilesUpload */
+  const handlePasteZoneClick = useCallback(async (zone: 'left' | 'center' | 'right') => {
+    if (!pastedFilePath || pasteLoading) return;
+    setPasteLoading(true);
+    try {
+      const res = await fetch('/api/read-file', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filePath: pastedFilePath }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+        throw new Error(err.error || `HTTP ${res.status}`);
+      }
+      const blob = await res.blob();
+      const fileName = decodeURIComponent(res.headers.get('X-File-Name') || 'paste.pdf');
+      const file = new File([blob], fileName, { type: 'application/pdf' });
+
+      const hasKey = isOpenRouterModel(model) ? !!openRouterApiKey : !!apiKey;
+      if (!hasKey) {
+        handleFilesUpload([file], 'idle');
+      } else {
+        const mode = zone === 'left' ? 'active' : zone === 'right' ? 'idle' : 'background';
+        handleFilesUpload([file], mode);
+      }
+      setPastedFilePath(null);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : '讀取檔案失敗';
+      alert(`無法讀取檔案：${msg}`);
+    } finally {
+      setPasteLoading(false);
+    }
+  }, [pastedFilePath, pasteLoading, handleFilesUpload, apiKey, openRouterApiKey, model]);
+
   // === 全域分析 toggle handler（FileListPanel 用）===
   const handleToggleAnalysis = useCallback(() => {
     const hasKey = isOpenRouterModel(model) ? !!openRouterApiKey : !!apiKey;
@@ -782,6 +865,88 @@ export default function PDFExtractApp() {
               <p className={`text-lg font-bold transition-colors duration-150 ${dragZone === 'right' ? 'text-gray-700' : 'text-gray-500'}`}>僅加入列表</p>
               <p className={`text-sm mt-1 transition-colors duration-150 ${dragZone === 'right' ? 'text-gray-600' : 'text-gray-400'}`}>放進列表，不執行分析</p>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* 貼上路徑覆蓋層（三區域可點擊，與拖放共用視覺風格） */}
+      {pastedFilePath && (
+        <div className="absolute inset-0 z-50 flex flex-col backdrop-blur-md">
+          {/* 頂部：顯示路徑 + Esc 提示 */}
+          <div className="flex items-center justify-center gap-3 px-6 py-3 bg-black/60 text-white flex-shrink-0">
+            <svg className="w-5 h-5 text-amber-300 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+            </svg>
+            <span className="text-sm font-mono truncate max-w-[60vw]" title={pastedFilePath}>{pastedFilePath}</span>
+            <button
+              onClick={() => setPastedFilePath(null)}
+              className="ml-4 px-3 py-1 text-xs bg-white/20 hover:bg-white/30 rounded-md transition-colors cursor-pointer flex-shrink-0"
+            >
+              Esc 取消
+            </button>
+          </div>
+          {/* 三區域可點擊 */}
+          <div className="flex flex-1">
+            {/* 左區 — 開啟並分析 */}
+            <button
+              type="button"
+              onClick={() => handlePasteZoneClick('left')}
+              disabled={pasteLoading}
+              className={`flex-1 flex flex-col items-center justify-center gap-3 border-4 border-dashed transition-all duration-150 cursor-pointer
+                bg-green-500/10 border-green-400/60 hover:bg-green-500/25 hover:border-green-500
+                disabled:opacity-50 disabled:cursor-wait`}
+            >
+              <div className="rounded-full p-4 bg-green-500/15">
+                <svg className="w-10 h-10 text-green-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M13 10V3L4 14h7v7l9-11h-7z" />
+                </svg>
+              </div>
+              <div className="text-center">
+                <p className="text-lg font-bold text-green-600">開啟並分析</p>
+                <p className="text-sm mt-1 text-green-500">立即切換至此檔案</p>
+              </div>
+            </button>
+            {/* 中區 — 背景分析 */}
+            <button
+              type="button"
+              onClick={() => handlePasteZoneClick('center')}
+              disabled={pasteLoading}
+              className={`flex-[1.6] flex flex-col items-center justify-center gap-3 border-4 border-dashed transition-all duration-150 cursor-pointer
+                bg-blue-500/10 border-blue-300/50 hover:bg-blue-500/25 hover:border-blue-500
+                disabled:opacity-50 disabled:cursor-wait`}
+            >
+              <div className="rounded-full p-4 bg-blue-500/10">
+                <svg className="w-10 h-10 text-blue-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M5 12h14M12 5l7 7-7 7" />
+                </svg>
+              </div>
+              <div className="text-center">
+                <p className="text-lg font-bold text-blue-500">背景分析</p>
+                <p className="text-sm mt-1 text-blue-400">排入佇列，背景執行</p>
+              </div>
+              {pasteLoading && (
+                <div className="animate-spin w-6 h-6 border-2 border-blue-500 border-t-transparent rounded-full mt-2" />
+              )}
+            </button>
+            {/* 右區 — 僅加入列表 */}
+            <button
+              type="button"
+              onClick={() => handlePasteZoneClick('right')}
+              disabled={pasteLoading}
+              className={`flex-1 flex flex-col items-center justify-center gap-3 border-4 border-dashed transition-all duration-150 cursor-pointer
+                bg-gray-500/10 border-gray-300/50 hover:bg-gray-500/25 hover:border-gray-500
+                disabled:opacity-50 disabled:cursor-wait`}
+            >
+              <div className="rounded-full p-4 bg-gray-500/10">
+                <svg className="w-10 h-10 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                </svg>
+              </div>
+              <div className="text-center">
+                <p className="text-lg font-bold text-gray-500">僅加入列表</p>
+                <p className="text-sm mt-1 text-gray-400">放進列表，不執行分析</p>
+              </div>
+            </button>
           </div>
         </div>
       )}
