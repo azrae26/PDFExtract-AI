@@ -11,6 +11,13 @@ import path from 'path';
 
 export async function POST(req: NextRequest) {
   try {
+    // 防護：本路由用 fs 讀伺服器絕對路徑，公開暴露＝資訊洩漏面。
+    // 設計上「路徑法」僅 localhost 有意義（伺服器＝本機），遠端伺服器看不到使用者本機磁碟、本就無用途，
+    // 故 production（Railway 等部署）一律拒絕，只在本機 dev 放行。
+    if (process.env.NODE_ENV === 'production') {
+      return NextResponse.json({ error: '遠端不支援路徑讀檔，請改用複製檔案貼上或拖入' }, { status: 403 });
+    }
+
     const { filePath } = await req.json();
 
     if (!filePath || typeof filePath !== 'string') {

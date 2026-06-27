@@ -240,7 +240,7 @@ export default function FileListPanel({
       <div ref={listRef} className="flex-1 overflow-y-auto">
         {files.length === 0 ? (
           <div className="px-3 py-6 text-center text-xs text-gray-400">
-            拖入 PDF 檔案
+            拖入或貼上 PDF 檔案
           </div>
         ) : (
           <ul className="py-1">

@@ -660,9 +660,16 @@ export default function PDFExtractApp() {
     [handleFilesUpload, dragZone, apiKey, openRouterApiKey, model]
   );
 
-  // === 貼上檔案路徑功能：偵測 paste 中的 .pdf 路徑 → 顯示三區域選擇 → 點擊後透過 API 讀取檔案 ===
-  const [pastedFilePath, setPastedFilePath] = useState<string | null>(null);
+  // === 貼上匯入功能：兩種來源自動分流，顯示三區域選擇 → 點擊後匯入 ===
+  //   kind:'file' — 剪貼簿直接含檔案（Ctrl+C 複製檔案本身）；瀏覽器已持有 bytes，遠端/本機皆可，免 API
+  //   kind:'path' — 剪貼簿是文字路徑（Ctrl+C 複製路徑）；需伺服器用 fs 讀本機磁碟，僅 localhost 可行
+  type PasteSource =
+    | { kind: 'file'; file: File; label: string }
+    | { kind: 'path'; path: string; label: string };
+  const [pasteSource, setPasteSource] = useState<PasteSource | null>(null);
   const [pasteLoading, setPasteLoading] = useState(false);
+  // 遠端誤貼「路徑字串」時的引導提示（路徑法在遠端先天不通，引導改用複製檔案本身）
+  const [pasteHint, setPasteHint] = useState<string | null>(null);
 
   /** 從貼上文字中擷取 PDF 路徑（支援 file:// URI、Windows/Unix 絕對路徑） */
   const extractPdfPath = (text: string): string | null => {
@@ -687,12 +694,32 @@ export default function PDFExtractApp() {
       const el = e.target as HTMLElement;
       const tag = el?.tagName?.toUpperCase();
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el?.isContentEditable) return;
+
+      // 優先：剪貼簿直接含檔案（Ctrl+C 複製「檔案本身」）→ 瀏覽器端已有 bytes，遠端/本機通用
+      const files = e.clipboardData?.files;
+      if (files && files.length > 0) {
+        const pdf = Array.from(files).find(
+          (f) => f.type === 'application/pdf' || f.name.toLowerCase().endsWith('.pdf')
+        );
+        if (pdf) {
+          e.preventDefault();
+          setPasteSource({ kind: 'file', file: pdf, label: pdf.name });
+          return;
+        }
+      }
+
+      // 其次：剪貼簿是文字路徑（Ctrl+C 複製「路徑」）→ 需伺服器讀本機磁碟，僅 localhost 可行
       const text = e.clipboardData?.getData('text/plain');
       if (!text) return;
       const pdfPath = extractPdfPath(text);
-      if (pdfPath) {
-        e.preventDefault();
-        setPastedFilePath(pdfPath);
+      if (!pdfPath) return;
+      e.preventDefault();
+      if (IS_DEV_MODE) {
+        setPasteSource({ kind: 'path', path: pdfPath, label: pdfPath });
+      } else {
+        // 遠端伺服器看不到你本機 D:\ 磁碟，路徑法必 404 → 引導改用複製檔案本身或拖入
+        setPasteHint('偵測到檔案路徑，但遠端伺服器無法讀取你本機磁碟。請改用 Ctrl+C 複製「檔案本身」再貼上，或直接把 PDF 拖進來。');
+        window.setTimeout(() => setPasteHint(null), 7000);
       }
     };
     document.addEventListener('paste', handler);
@@ -701,47 +728,49 @@ export default function PDFExtractApp() {
 
   // Esc 關閉貼上覆蓋層
   useEffect(() => {
-    if (!pastedFilePath) return;
+    if (!pasteSource) return;
     const handler = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setPastedFilePath(null);
+      if (e.key === 'Escape') setPasteSource(null);
     };
     document.addEventListener('keydown', handler);
     return () => document.removeEventListener('keydown', handler);
-  }, [pastedFilePath]);
+  }, [pasteSource]);
 
-  /** 貼上路徑 → 選區後：呼叫 /api/read-file 取得檔案 → handleFilesUpload */
+  /** 選區後匯入：file 來源直接用瀏覽器持有的 bytes；path 來源呼叫 /api/read-file 取檔 → handleFilesUpload */
   const handlePasteZoneClick = useCallback(async (zone: 'left' | 'center' | 'right') => {
-    if (!pastedFilePath || pasteLoading) return;
+    if (!pasteSource || pasteLoading) return;
+    // 無金鑰時一律僅加入列表（idle）；有金鑰才依區域決定 active/background/idle
+    const hasKey = isOpenRouterModel(model) ? !!openRouterApiKey : !!apiKey;
+    const mode = !hasKey ? 'idle' : zone === 'left' ? 'active' : zone === 'right' ? 'idle' : 'background';
+
     setPasteLoading(true);
     try {
-      const res = await fetch('/api/read-file', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ filePath: pastedFilePath }),
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
-        throw new Error(err.error || `HTTP ${res.status}`);
-      }
-      const blob = await res.blob();
-      const fileName = decodeURIComponent(res.headers.get('X-File-Name') || 'paste.pdf');
-      const file = new File([blob], fileName, { type: 'application/pdf' });
-
-      const hasKey = isOpenRouterModel(model) ? !!openRouterApiKey : !!apiKey;
-      if (!hasKey) {
-        handleFilesUpload([file], 'idle');
+      let file: File;
+      if (pasteSource.kind === 'file') {
+        file = pasteSource.file; // 瀏覽器已持有 bytes，免 API
       } else {
-        const mode = zone === 'left' ? 'active' : zone === 'right' ? 'idle' : 'background';
-        handleFilesUpload([file], mode);
+        const res = await fetch('/api/read-file', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ filePath: pasteSource.path }),
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+          throw new Error(err.error || `HTTP ${res.status}`);
+        }
+        const blob = await res.blob();
+        const fileName = decodeURIComponent(res.headers.get('X-File-Name') || 'paste.pdf');
+        file = new File([blob], fileName, { type: 'application/pdf' });
       }
-      setPastedFilePath(null);
+      handleFilesUpload([file], mode);
+      setPasteSource(null);
     } catch (err) {
       const msg = err instanceof Error ? err.message : '讀取檔案失敗';
       alert(`無法讀取檔案：${msg}`);
     } finally {
       setPasteLoading(false);
     }
-  }, [pastedFilePath, pasteLoading, handleFilesUpload, apiKey, openRouterApiKey, model]);
+  }, [pasteSource, pasteLoading, handleFilesUpload, apiKey, openRouterApiKey, model]);
 
   // === 全域分析 toggle handler（FileListPanel 用）===
   const handleToggleAnalysis = useCallback(() => {
@@ -869,17 +898,39 @@ export default function PDFExtractApp() {
         </div>
       )}
 
-      {/* 貼上路徑覆蓋層（三區域可點擊，與拖放共用視覺風格） */}
-      {pastedFilePath && (
+      {/* 遠端誤貼「路徑字串」的引導提示（自動消失 / 可手動關閉） */}
+      {pasteHint && (
+        <div className="absolute top-4 left-1/2 -translate-x-1/2 z-[60] max-w-[70vw] px-4 py-3 bg-amber-50 border border-amber-300 text-amber-800 text-sm rounded-lg shadow-lg flex items-start gap-2">
+          <svg className="w-5 h-5 flex-shrink-0 mt-0.5 text-amber-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+          <span className="leading-snug">{pasteHint}</span>
+          <button
+            onClick={() => setPasteHint(null)}
+            className="ml-1 flex-shrink-0 text-amber-400 hover:text-amber-600 cursor-pointer"
+            title="關閉"
+          >
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+      )}
+
+      {/* 貼上匯入覆蓋層（三區域可點擊，與拖放共用視覺風格） */}
+      {pasteSource && (
         <div className="absolute inset-0 z-50 flex flex-col backdrop-blur-md">
-          {/* 頂部：顯示路徑 + Esc 提示 */}
+          {/* 頂部：顯示來源（檔名或路徑）+ Esc 提示 */}
           <div className="flex items-center justify-center gap-3 px-6 py-3 bg-black/60 text-white flex-shrink-0">
             <svg className="w-5 h-5 text-amber-300 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
             </svg>
-            <span className="text-sm font-mono truncate max-w-[60vw]" title={pastedFilePath}>{pastedFilePath}</span>
+            <span className="text-[11px] px-1.5 py-0.5 rounded bg-white/15 flex-shrink-0">
+              {pasteSource.kind === 'file' ? '檔案' : '路徑'}
+            </span>
+            <span className="text-sm font-mono truncate max-w-[55vw]" title={pasteSource.label}>{pasteSource.label}</span>
             <button
-              onClick={() => setPastedFilePath(null)}
+              onClick={() => setPasteSource(null)}
               className="ml-4 px-3 py-1 text-xs bg-white/20 hover:bg-white/30 rounded-md transition-colors cursor-pointer flex-shrink-0"
             >
               Esc 取消
