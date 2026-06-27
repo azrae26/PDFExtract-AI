@@ -1,20 +1,19 @@
 @echo off
-rem 解除 PDFExtract 本機橋接：移除開機自啟 + 結束橋接程式 + 刪除檔案
-chcp 65001 >nul
-title PDFExtract 本機橋接 解除安裝
+rem Uninstall PDFExtract local bridge: remove auto-start, stop bridge, delete files.
+rem (ASCII only on purpose: Chinese in .bat breaks cmd parsing.)
+title PDFExtract bridge - uninstall
 set "TARGET=%LOCALAPPDATA%\PDFExtractBridge"
 set "LNK=%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\PDFExtractBridge.lnk"
 
-echo 移除開機自啟捷徑...
+echo Removing auto-start shortcut...
 if exist "%LNK%" del "%LNK%"
 
-echo 結束橋接程式（佔用 38217 埠的 node）...
-rem 只結束聽 38217 的那個 node，不動其他 node 程序
+echo Stopping bridge (node listening on 38217)...
 for /f "tokens=5" %%P in ('netstat -ano ^| findstr ":38217" ^| findstr "LISTENING"') do taskkill /f /pid %%P >nul 2>&1
 
-echo 刪除檔案...
+echo Deleting files...
 if exist "%TARGET%" rmdir /s /q "%TARGET%"
 
 echo.
-echo 已解除。開機不再自動啟動橋接。
+echo Done. The bridge will no longer auto-start.
 pause
