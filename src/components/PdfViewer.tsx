@@ -19,6 +19,10 @@ import { NORMALIZED_MAX, BOX_COLORS } from '@/lib/constants';
 /** 預設寬高比（A4）— 頁面尚未載入時用於佔位 */
 const DEFAULT_RATIO = 1.414;
 
+/** 載入效能量測：整個 page 載入只記一次「首頁 PDF 內容光柵化完成」（reload 後模組重載 → 自動重置）。
+ *  對照 layout 的 T0 日誌，performance.now() 以導航起點為 0。 */
+let _firstPaintLogged = false;
+
 interface PdfViewerProps {
   pdfUrl: string | null;
   numPages: number;
@@ -884,6 +888,12 @@ export default function PdfViewer({
                       renderTextLayer={false}
                       renderAnnotationLayer={false}
                       onLoadSuccess={(page) => handlePageLoad(pageNum, page)}
+                      onRenderSuccess={() => {
+                        if (!_firstPaintLogged) {
+                          _firstPaintLogged = true;
+                          console.log(`[PERF] ✅ PDF 內容畫出完成 @ ${Math.round(performance.now())}ms（page ${pageNum}，導航起點為 0）`);
+                        }
+                      }}
                       onLoadError={handlePageError}
                       loading={
                         <div

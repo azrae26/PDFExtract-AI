@@ -37,6 +37,12 @@ export default function RootLayout({
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
+        {/* 載入效能量測錨點：盡早記錄導航起點（performance.now 以導航為 0），對照 PdfViewer 的「PDF 內容畫出」日誌 */}
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `console.log('[PERF] ⏱️ T0 app 啟動 @ ' + Math.round(performance.now()) + 'ms（導航起點為 0）');`,
+          }}
+        />
         {children}
       </body>
     </html>
