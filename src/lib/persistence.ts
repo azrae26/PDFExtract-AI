@@ -13,9 +13,11 @@ import { Region, FileEntry } from '@/lib/types';
 
 // === 常數 ===
 const DB_NAME = 'pdfextract-ai-db';
-const DB_VERSION = 1;
+const DB_VERSION = 2; // v2：新增 handles store（存 File System Access 資料夾 handle）
 const STORE_SESSION = 'session';
 const STORE_PDF_FILES = 'pdf-files';
+const STORE_HANDLES = 'handles'; // 本機資料夾 handle（持久設定，非 session；clearAll 不清）
+const KEY_DIR_HANDLE = 'dir';
 
 // === 序列化格式（僅內部使用）===
 
@@ -66,6 +68,9 @@ function openDB(): Promise<IDBDatabase> {
       }
       if (!db.objectStoreNames.contains(STORE_PDF_FILES)) {
         db.createObjectStore(STORE_PDF_FILES);
+      }
+      if (!db.objectStoreNames.contains(STORE_HANDLES)) {
+        db.createObjectStore(STORE_HANDLES);
       }
     };
 
@@ -293,5 +298,62 @@ export async function clearAll(): Promise<void> {
   } catch (e) {
     const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
     console.warn(`[persistence][${ts}] ⚠️ Failed to clear IndexedDB:`, e);
+  }
+}
+
+// === 本機資料夾 handle 持久化（File System Access API）===
+// FileSystemDirectoryHandle 可被 structured clone，直接存 IndexedDB；重開後取回需再查/請求權限。
+// 刻意獨立於 session（clearAll 不清）：資料夾連結是使用者持久設定，清空檔案不應斷開連結。
+
+/** 儲存資料夾 handle */
+export async function saveDirHandle(handle: FileSystemDirectoryHandle): Promise<void> {
+  try {
+    const db = await openDB();
+    const tx = db.transaction(STORE_HANDLES, 'readwrite');
+    tx.objectStore(STORE_HANDLES).put(handle, KEY_DIR_HANDLE);
+    await new Promise<void>((resolve, reject) => {
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+    db.close();
+  } catch (e) {
+    const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
+    console.warn(`[persistence][${ts}] ⚠️ Failed to save dir handle:`, e);
+  }
+}
+
+/** 取回資料夾 handle（無則回 null） */
+export async function loadDirHandle(): Promise<FileSystemDirectoryHandle | null> {
+  try {
+    const db = await openDB();
+    const handle = await new Promise<FileSystemDirectoryHandle | undefined>((resolve, reject) => {
+      const tx = db.transaction(STORE_HANDLES, 'readonly');
+      const req = tx.objectStore(STORE_HANDLES).get(KEY_DIR_HANDLE);
+      req.onsuccess = () => resolve(req.result as FileSystemDirectoryHandle | undefined);
+      req.onerror = () => reject(req.error);
+    });
+    db.close();
+    return handle ?? null;
+  } catch (e) {
+    const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
+    console.warn(`[persistence][${ts}] ⚠️ Failed to load dir handle:`, e);
+    return null;
+  }
+}
+
+/** 清除資料夾 handle（取消連結） */
+export async function clearDirHandle(): Promise<void> {
+  try {
+    const db = await openDB();
+    const tx = db.transaction(STORE_HANDLES, 'readwrite');
+    tx.objectStore(STORE_HANDLES).delete(KEY_DIR_HANDLE);
+    await new Promise<void>((resolve, reject) => {
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+    db.close();
+  } catch (e) {
+    const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
+    console.warn(`[persistence][${ts}] ⚠️ Failed to clear dir handle:`, e);
   }
 }

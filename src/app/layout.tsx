@@ -3,7 +3,7 @@
  * 職責：設定全域字型、metadata、body 樣式
  */
 
-import type { Metadata } from 'next';
+import type { Metadata, Viewport } from 'next';
 import { Geist, Geist_Mono } from 'next/font/google';
 import './globals.css';
 
@@ -20,6 +20,11 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: 'PDFExtract AI — PDF 智能文本提取',
   description: '上傳 PDF，透過 Gemini AI 自動辨識並提取分析文本',
+  icons: { icon: '/icon.svg' },
+};
+
+export const viewport: Viewport = {
+  themeColor: '#4f46e5',
 };
 
 export default function RootLayout({

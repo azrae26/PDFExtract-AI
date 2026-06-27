@@ -20,6 +20,7 @@ import PdfUploader from './PdfUploader';
 import PdfViewer from './PdfViewer';
 import TextPanel from './TextPanel';
 import FileListPanel from './FileListPanel';
+import FolderPanel from './FolderPanel';
 import { Region } from '@/lib/types';
 import { DEFAULT_PROMPT, DEFAULT_TABLE_PROMPT } from '@/lib/constants';
 import { DEFAULT_BROKER_ALIAS_GROUPS, DEFAULT_BROKER_SKIP_MAP } from '@/lib/brokerUtils';
@@ -772,6 +773,11 @@ export default function PDFExtractApp() {
     }
   }, [pasteSource, pasteLoading, handleFilesUpload, apiKey, openRouterApiKey, model]);
 
+  // === 本機資料夾匯入（FolderPanel 用）：點檔 → File → handleFilesUpload ===
+  const handleFolderImport = useCallback((file: File, mode: 'active' | 'background' | 'idle') => {
+    handleFilesUpload([file], mode);
+  }, [handleFilesUpload]);
+
   // === 全域分析 toggle handler（FileListPanel 用）===
   const handleToggleAnalysis = useCallback(() => {
     const hasKey = isOpenRouterModel(model) ? !!openRouterApiKey : !!apiKey;
@@ -1002,8 +1008,13 @@ export default function PDFExtractApp() {
         </div>
       )}
 
-      {/* 最左側面板 — 檔案列表 */}
-      <div className="h-full flex-shrink-0" style={{ width: fileListWidth }}>
+      {/* 最左側面板 — 本機資料夾匯入（頂部）+ 檔案列表 */}
+      <div className="h-full flex-shrink-0 flex flex-col" style={{ width: fileListWidth }}>
+        <FolderPanel
+          onImport={handleFolderImport}
+          hasKey={isOpenRouterModel(model) ? !!openRouterApiKey : !!apiKey}
+        />
+        <div className="flex-1 min-h-0">
         <FileListPanel
           files={files}
           activeFileId={activeFileId}
@@ -1019,6 +1030,7 @@ export default function PDFExtractApp() {
           exportAllResult={exportAllResult}
           onExportAllReset={() => { setExportAllState('idle'); setExportAllResult(null); }}
         />
+        </div>
       </div>
 
       {/* 檔案列表分界線 */}

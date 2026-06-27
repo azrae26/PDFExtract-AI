@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- 全幅背景（maskable 安全：重要內容置中 80%） -->
+  <rect width="512" height="512" rx="96" fill="#4f46e5"/>
+  <!-- 文件 -->
+  <g fill="none" stroke="#ffffff" stroke-width="20" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M170 120 h120 l72 72 v200 a16 16 0 0 1 -16 16 H170 a16 16 0 0 1 -16 -16 V136 a16 16 0 0 1 16 -16 z"/>
+    <path d="M288 120 v64 a8 8 0 0 0 8 8 h64"/>
+  </g>
+  <!-- AI 字樣 -->
+  <text x="256" y="320" text-anchor="middle" font-family="system-ui, Arial, sans-serif" font-size="96" font-weight="800" fill="#ffffff">AI</text>
+  <!-- 放大鏡（提取/辨識意象） -->
+  <g stroke="#a5b4fc" stroke-width="22" stroke-linecap="round" fill="none">
+    <circle cx="318" cy="372" r="34"/>
+    <line x1="344" y1="398" x2="378" y2="432"/>
+  </g>
+</svg>
