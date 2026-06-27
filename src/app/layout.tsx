@@ -34,12 +34,6 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="zh-TW">
-      <head>
-        {/* 預載 pdfjs worker（~280KB）：否則要等 PdfViewer 掛載觸發 getDocument 才開始下載（實測 ~1.3s），
-            擋住 PDF 首次渲染。提前到與主 chunk 並行下載，getDocument 時 worker 已就緒。
-            路徑須對齊 PDFExtractApp 的 workerSrc 與 copy-pdf-worker.mjs 複製的同源檔。 */}
-        <link rel="modulepreload" href="/pdf.worker.min.mjs" />
-      </head>
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
