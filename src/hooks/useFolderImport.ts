@@ -73,17 +73,22 @@ export default function useFolderImport(): UseFolderImport {
       console.log(`[PERF] 📂 資料夾權限=${perm} @ ${Math.round(performance.now())}ms`);
       if (perm === 'granted') {
         setLoading(true); // 立即顯示「讀取中」，避免延後期間閃現「沒有 PDF」
+        // 等活躍 PDF 畫出後才列舉：上萬檔的 for-await dir.values() 會灌爆事件迴圈、餓死 PDF 的 getDocument
+        // （實證：getDocument 990ms 呼叫，被 12,835 檔列舉的 2.6s 卡到 4214ms 才解析）。
+        // 用確定性訊號（PdfViewer 首次 paint 派發 'pdf:first-paint'）取代 requestIdleCallback（會與 PDF 載入競態）。
+        let fired = false;
+        let timer = 0;
         const run = () => {
-          console.log(`[PERF] 📂 idle 觸發列舉 @ ${Math.round(performance.now())}ms`);
-          if (!cancelled) loadList(stored);
+          if (fired || cancelled) return;
+          fired = true;
+          window.removeEventListener('pdf:first-paint', run);
+          window.clearTimeout(timer);
+          console.log(`[PERF] 📂 PDF 已畫出 → 開始列舉 @ ${Math.round(performance.now())}ms`);
+          loadList(stored);
         };
-        if (typeof window.requestIdleCallback === 'function') {
-          const id = window.requestIdleCallback(run, { timeout: 3000 });
-          cancelDefer = () => window.cancelIdleCallback(id);
-        } else {
-          const id = window.setTimeout(run, 1200);
-          cancelDefer = () => window.clearTimeout(id);
-        }
+        window.addEventListener('pdf:first-paint', run);
+        timer = window.setTimeout(run, 5000); // 保險：無 PDF / paint 未觸發時仍會列
+        cancelDefer = () => { window.removeEventListener('pdf:first-paint', run); window.clearTimeout(timer); };
       }
     })();
     return () => { cancelled = true; cancelDefer(); };
