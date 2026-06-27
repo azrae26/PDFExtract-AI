@@ -974,6 +974,11 @@ export default function useFileManager({
       });
 
       setFiles((prev) => [...prev, ...newEntries]);
+      // 同步更新 filesRef：稍後的 setTimeout(processNextInQueue) 靠 filesRef 找 queued 檔。
+      // gotcha：從非同步情境觸發上傳時（如「貼路徑」在 await fetch 之後呼叫本函式），
+      // React 可能尚未 commit、filesRef.current 仍是舊值 → processNextInQueue 找不到新 queued 檔而不啟動分析。
+      // 拖放在 React 事件內同步呼叫故無事；此處補同步寫入，讓佇列觸發不受 commit 時序影響。
+      filesRef.current = [...filesRef.current, ...newEntries];
 
       // 儲存 PDF binary 到 IndexedDB，完成後立即存檔 session（確保 F5 不遺失）
       Promise.all(
