@@ -12,9 +12,14 @@ import { Document, Page, pdfjs } from 'react-pdf';
 import 'react-pdf/dist/Page/AnnotationLayer.css';
 import BoundingBox from './BoundingBox';
 import { Region } from '@/lib/types';
-import { NORMALIZED_MAX, BOX_COLORS } from '@/lib/constants';
+import { NORMALIZED_MAX, BOX_COLORS, PDF_WORKER_SRC } from '@/lib/constants';
 
-// PDF.js worker 由 PDFExtractApp 統一設定，這裡不重複
+// 設定 PDF.js worker（同源 serve）。放此模組頂層而非殼層：PdfViewer 由 PDFExtractApp 以 next/dynamic
+// 拆成獨立 chunk，故 react-pdf+pdfjs 與此 worker 設定都不進殼層 critical chunk。
+// 與 lib/pdfjsLazy（hook getDocument 路徑）同設 PDF_WORKER_SRC——同一 pdfjs-dist 單例、冪等無衝突。
+if (typeof window !== 'undefined') {
+  pdfjs.GlobalWorkerOptions.workerSrc = PDF_WORKER_SRC;
+}
 
 /** 預設寬高比（A4）— 頁面尚未載入時用於佔位 */
 const DEFAULT_RATIO = 1.414;

@@ -10,7 +10,7 @@
  */
 
 import { useState, useCallback, useRef } from 'react';
-import { pdfjs } from 'react-pdf';
+import type { pdfjs } from 'react-pdf';
 import { Region } from '@/lib/types';
 import {
   FileRegionsUpdater,

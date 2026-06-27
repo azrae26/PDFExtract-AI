@@ -17,7 +17,8 @@
  */
 
 import { useState, useCallback, useRef } from 'react';
-import { pdfjs } from 'react-pdf';
+import type { pdfjs } from 'react-pdf';
+import { getPdfjs } from '@/lib/pdfjsLazy';
 import { Region } from '@/lib/types';
 import {
   FileRegionsUpdater,
@@ -212,7 +213,8 @@ export default function useAnalysis({
       // === 載入第一個檔案 ===
       let firstDoc: pdfjs.PDFDocumentProxy;
       try {
-        firstDoc = await pdfjs.getDocument(fileUrl).promise;
+        const pdfjsLib = await getPdfjs();
+        firstDoc = await pdfjsLib.getDocument(fileUrl).promise;
       } catch (e) {
         const ts2 = new Date().toLocaleTimeString('en-US', { hour12: false });
         console.error(`[useAnalysis][${ts2}] ❌ Failed to load PDF for analysis:`, e);
@@ -401,7 +403,8 @@ export default function useAnalysis({
             // 載入新檔案的 pdfDoc
             let newDoc: pdfjs.PDFDocumentProxy;
             try {
-              newDoc = await pdfjs.getDocument(next.url).promise;
+              const pdfjsLib = await getPdfjs();
+              newDoc = await pdfjsLib.getDocument(next.url).promise;
             } catch (e) {
               const ts2 = new Date().toLocaleTimeString('en-US', { hour12: false });
               console.error(`[useAnalysis][${ts2}] ❌ Failed to load PDF for file ${next.fileId}:`, e);

@@ -12,7 +12,7 @@
  * - 共用型別：FileRegionsUpdater、FileReportUpdater、FileProgressUpdater、SessionValidator
  */
 
-import { pdfjs } from 'react-pdf';
+import type { pdfjs } from 'react-pdf';
 import { Region } from '@/lib/types';
 import { RENDER_SCALE, JPEG_QUALITY, NORMALIZED_MAX } from '@/lib/constants';
 import { extractTextForRegions } from '@/lib/pdfTextExtract';

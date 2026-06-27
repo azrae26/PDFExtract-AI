@@ -5,6 +5,13 @@
 
 import { BoxColor } from './types';
 
+/**
+ * PDF.js worker 路徑（同源 serve，public/pdf.worker.min.mjs）。
+ * SSoT：設定 workerSrc 的兩個執行點（pdfjsLazy 的 hook 路徑、PdfViewer 的算繪路徑）都引用此值。
+ * 版本由 prebuild/predev 腳本從 node_modules 複製，與 pdfjs 對齊不漂移（見 scripts/copy-pdf-worker.mjs）。
+ */
+export const PDF_WORKER_SRC = '/pdf.worker.min.mjs';
+
 /** 預設 Prompt — 用戶可在左側面板修改 */
 export const DEFAULT_PROMPT = `你是專業文件分析助手。分析圖片（PDF頁面），判斷是否含對主要公司或產業的分析文本，給出座標。
 

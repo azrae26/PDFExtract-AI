@@ -14,7 +14,8 @@
  */
 
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
-import { pdfjs } from 'react-pdf';
+import type { pdfjs } from 'react-pdf';
+import { getPdfjs } from '@/lib/pdfjsLazy';
 import { Region, FileEntry, MetadataCandidate } from '@/lib/types';
 import { FileProgressUpdater } from '@/hooks/analysisHelpers';
 import { buildBrokerAliasMap, normalizeBrokerByAlias, parseMetadataFromFilename } from '@/lib/brokerUtils';
@@ -24,6 +25,12 @@ import { saveSession, loadSession, savePdfBlob, deletePdfBlob, clearAll as clear
 // === PDF 預載 / 快取常數 ===
 const PDF_PRELOAD_WINDOW = 5; // 預載視窗大小（目前 + 後 4 份）
 const PDF_CACHE_MAX = 14;     // 快取超過此數量才開始驅逐
+// 最後保險：活躍檔「getDocument 成功但渲染永遠不 paint」（極罕見）時逾時仍展開，避免永久鎖住切檔。
+// 設長：必須遠大於「最壞情況的首屏 paint」（高負載下 getDocument + 光柵化可達數十秒），否則會在 paint
+// 前提早觸發、讓次檔 getDocument/光柵化搶走活躍檔首屏光柵化（正是本優化要避免、且實測會反咬的事——
+// 短 timeout 在慢機上早於 first-paint 觸發，使三檔同時光柵化、首屏反而從 ~20s 拖到 ~35s）。
+// 常見的「活躍檔載入失敗」由 loadPdfDocOnDemand 的 catch 即時展開，不必等這個長 timeout。
+const MOUNT_EXPAND_FALLBACK_MS = 30000;
 
 /** 空 Map 常數（避免每次 render 建立新物件導致不必要的 re-render） */
 const EMPTY_MAP = new Map<number, Region[]>();
@@ -176,6 +183,14 @@ export default function useFileManager({
   // 不變量：展開發生在首次 PDF 載入後約 1 幀，「切檔零延遲」照舊；展開前極短時間內切檔僅延遲一個 Document 掛載。
   const [mountWindowExpanded, setMountWindowExpanded] = useState(false);
   const mountWindowExpandedRef = useRef(false);
+  // 展開掛載視窗（冪等）：開始掛載/預載活躍檔以外的檔。觸發時機見下方 effect（first-paint/保險）與
+  // loadPdfDocOnDemand 的 catch（活躍檔載入失敗）。
+  const expandMountWindow = useCallback(() => {
+    if (!mountWindowExpandedRef.current) {
+      mountWindowExpandedRef.current = true;
+      setMountWindowExpanded(true);
+    }
+  }, []);
   // 標記是否正在自動處理佇列（避免重複觸發）
   const processingQueueRef = useRef(false);
 
@@ -459,7 +474,8 @@ export default function useFileManager({
     if (!fileEntry) return null;
     try {
       console.log(`[PERF] 🔵 getDocument 呼叫 @ ${Math.round(performance.now())}ms (${fileEntry.name})`);
-      const doc = await pdfjs.getDocument(fileEntry.url).promise;
+      const pdfjsLib = await getPdfjs();
+      const doc = await pdfjsLib.getDocument(fileEntry.url).promise;
       console.log(`[PERF] 🟢 getDocument 解析完成 @ ${Math.round(performance.now())}ms (${fileEntry.name})`);
       // 儲存到快取（標記為 selfLoaded，可安全 destroy）
       pdfDocCacheRef.current.set(fileId, doc);
@@ -467,9 +483,11 @@ export default function useFileManager({
       return doc;
     } catch (e) {
       console.warn(`[useFileManager] ⚠️ On-demand load failed for ${fileId}:`, e);
+      // 活躍檔載入失敗 → paint 永不來，立即展開掛載視窗確保使用者仍可切到其他檔（不必等長 timeout）。
+      expandMountWindow();
       return null;
     }
-  }, []);
+  }, [expandMountWindow]);
 
   // === useAnalysis Hook ===
   const {
@@ -557,7 +575,7 @@ export default function useFileManager({
     // 快取也沒有，則載入取得頁數
     if (pages === 0) {
       try {
-        const tempDoc = await pdfjs.getDocument(nextQueued.url).promise;
+        const tempDoc = await (await getPdfjs()).getDocument(nextQueued.url).promise;
         pages = tempDoc.numPages;
         // 存入快取（避免重複載入）
         pdfDocCacheRef.current.set(nextQueued.id, tempDoc);
@@ -728,8 +746,8 @@ export default function useFileManager({
       const fileEntry = currentFiles.find((f) => f.id === fid);
       if (!fileEntry) return;
 
-      // 非同步預載（不阻塞 UI）
-      pdfjs.getDocument(fileEntry.url).promise.then((doc) => {
+      // 非同步預載（不阻塞 UI）；pdfjs 延遲載入（不進殼層 chunk）
+      getPdfjs().then((pdfjsLib) => pdfjsLib.getDocument(fileEntry.url).promise).then((doc) => {
         // 檢查此檔案是否還在 files 中（可能已被刪除）
         const stillExists = filesRef.current.some((f) => f.id === fid);
         if (!stillExists) {
@@ -790,17 +808,22 @@ export default function useFileManager({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeFileId, files.length, mountWindowExpanded]);
 
-  // B3 展開保險：活躍檔 Document 若載入失敗不會觸發展開，有檔後 1.5s 強制展開確保切檔零延遲可用
+  // B3 掛載視窗展開：等「活躍檔實際畫出」(pdf:first-paint) 才展開掛載+預載其餘檔，
+  // 不讓次檔的 getDocument/光柵化搶活躍檔首屏的 CPU/worker（延後第二個 PDF 預載到活躍檔畫完）。
+  // 為何用 pdf:first-paint 而非 Document onLoadSuccess：後者僅代表 getDocument 結束，光柵化（負載下
+  // 可達數秒～數十秒）還沒跑完，此時掛次檔仍會搶活躍檔光柵化——正是首屏變慢的主因。
+  // 觸發＝事件驅動（first-paint），非短 timeout：getDocument 本身在慢機可耗數秒，短 timeout 會早於
+  // first-paint 觸發而失效。MOUNT_EXPAND_FALLBACK_MS 僅為「載入成功卻永不 paint」的最後保險（設很長）。
+  // 直接 setState（不用 rAF——背景分頁 rAF 不觸發會永不展開、破壞切檔零延遲）。
   useEffect(() => {
     if (files.length === 0 || mountWindowExpanded) return;
-    const id = setTimeout(() => {
-      if (!mountWindowExpandedRef.current) {
-        mountWindowExpandedRef.current = true;
-        setMountWindowExpanded(true);
-      }
-    }, 1500);
-    return () => clearTimeout(id);
-  }, [files.length, mountWindowExpanded]);
+    window.addEventListener('pdf:first-paint', expandMountWindow);
+    const id = setTimeout(expandMountWindow, MOUNT_EXPAND_FALLBACK_MS);
+    return () => {
+      window.removeEventListener('pdf:first-paint', expandMountWindow);
+      clearTimeout(id);
+    };
+  }, [files.length, mountWindowExpanded, expandMountWindow]);
 
   // 清理所有檔案的 object URL
   useEffect(() => {
@@ -908,7 +931,7 @@ export default function useFileManager({
       const queuedFileSkip = lookupBrokerSkip(nextQueued, brokerSkipMapRef.current);
       const queuedFileNumPages = nextQueued.numPages;
       const queuedFilePageRegions = nextQueued.pageRegions;
-      pdfjs.getDocument(queuedFileUrl).promise.then((doc) => {
+      getPdfjs().then((pdfjsLib) => pdfjsLib.getDocument(queuedFileUrl).promise).then((doc) => {
         // 存入快取
         if (!pdfDocCacheRef.current.has(queuedFileId)) {
           pdfDocCacheRef.current.set(queuedFileId, doc);
@@ -1021,7 +1044,7 @@ export default function useFileManager({
       // 確保「總頁數」統計從一開始就準確
       for (const entry of newEntries) {
         if (pdfDocCacheRef.current.has(entry.id)) continue; // 已快取的跳過
-        pdfjs.getDocument(entry.url).promise.then((doc) => {
+        getPdfjs().then((pdfjsLib) => pdfjsLib.getDocument(entry.url).promise).then((doc) => {
           // 確認檔案仍存在
           if (!filesRef.current.some((f) => f.id === entry.id)) {
             doc.destroy();
@@ -1067,14 +1090,10 @@ export default function useFileManager({
       }
 
       // 僅活躍檔案才設定 pdfDocRef（供 useAnalysis 使用）
+      // 注意：掛載視窗展開已改由 pdf:first-paint 觸發（見上方 effect），不在此（onLoadSuccess）展開——
+      // onLoadSuccess 時光柵化尚未跑完，提早掛次檔會搶活躍檔首屏光柵化。
       if (fileId === activeFileIdRef.current) {
         pdfDocRef.current = pdf;
-        // B3：活躍檔 Document 載入完成（getDocument 已結束）→ 立即展開掛載+預載其餘檔。
-        // 直接 setState（不用 rAF——背景分頁 rAF 不觸發會導致永不展開、破壞切檔零延遲）。
-        if (!mountWindowExpandedRef.current) {
-          mountWindowExpandedRef.current = true;
-          setMountWindowExpanded(true);
-        }
       }
 
       // 更新檔案的 numPages

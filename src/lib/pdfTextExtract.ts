@@ -7,7 +7,7 @@
  * 依賴：pdfjs-dist (PDFPageProxy)、pdfTextExtractCore（純演算法）、types.ts（RegionDebugInfo）
  */
 
-import { pdfjs } from 'react-pdf';
+import type { pdfjs } from 'react-pdf';
 import { Region, RegionDebugInfo } from './types';
 import {
   NormTextItem,

@@ -15,9 +15,9 @@
 'use client';
 
 import { useState, useCallback, useRef, useEffect } from 'react';
-import { pdfjs } from 'react-pdf';
+import dynamic from 'next/dynamic';
+import type { pdfjs } from 'react-pdf';
 import PdfUploader from './PdfUploader';
-import PdfViewer from './PdfViewer';
 import TextPanel from './TextPanel';
 import FileListPanel from './FileListPanel';
 import FolderPanel from './FolderPanel';
@@ -29,6 +29,10 @@ import type { ModelChoice } from '@/app/api/models/route';
 import useFileManager from '@/hooks/useFileManager';
 import usePanelResize from '@/hooks/usePanelResize';
 import { extractTextForRegions } from '@/lib/pdfTextExtract';
+
+// PdfViewer 以 next/dynamic 拆成獨立 chunk：它是唯一靜態載入 react-pdf 算繪元件（Document/Page）者，
+// 拆出後 react-pdf+pdfjs（~605KB）不進殼層 critical chunk，待首個 PdfViewer 掛載才載入（與殼層並行）。
+const PdfViewer = dynamic(() => import('./PdfViewer'), { ssr: false });
 
 // === 預設批次並行數量 ===
 const DEFAULT_BATCH_SIZE = 3;
@@ -69,13 +73,8 @@ const IS_DEV_MODE = typeof window !== 'undefined' &&
  */
 const LOCAL_BRIDGE_ORIGIN = 'http://127.0.0.1:38217';
 
-// 設定 PDF.js worker：同源 serve（public/pdf.worker.min.mjs）。
-// 改自 unpkg CDN——跨來源 1MB + http→https 307 跳轉是首載 PDF 的最大瓶頸；
-// 同源消除跳轉、可瀏覽器快取、不受外部 CDN 冷啟動影響。
-// 版本由 prebuild 腳本（package.json）從 node_modules 複製，避免與 pdfjs 版本漂移。
-if (typeof window !== 'undefined') {
-  pdfjs.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs';
-}
+// PDF.js worker 設定已移出殼層——改在 PdfViewer（算繪 chunk）與 lib/pdfjsLazy（hook 取用路徑）設定，
+// 使 pdfjs 不再被殼層靜態 import 而打包進 critical chunk。路徑常數見 constants.PDF_WORKER_SRC。
 
 export default function PDFExtractApp() {
   // === UI 配置狀態（持久化到 localStorage）===
